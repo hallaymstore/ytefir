@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#070b14" />
+  <meta name="description" content="YT Shield Live — vertical YouTube LIVE control room and suspicious traffic monitor." />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="stylesheet" href="/styles.css" />
+  <title>YT Shield Live</title>
+</head>
+<body>
+  <div class="noise"></div>
+
+  <div id="loginView" class="login-view">
+    <div class="login-card glass">
+      <div class="brand big"><span class="brand-mark">YT</span><span>Shield <b>Live</b></span></div>
+      <p class="muted">Vertical LIVE • Shorts Feed • Traffic Shield</p>
+      <form id="loginForm">
+        <label>Login<input id="loginUser" autocomplete="username" value="admin" required /></label>
+        <label>Parol<input id="loginPass" type="password" autocomplete="current-password" required /></label>
+        <button class="btn primary wide" type="submit">Kirish</button>
+        <div id="loginError" class="form-error"></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="appView" class="app hidden">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">YT</span><span>Shield <b>Live</b></span></div>
+      <div class="top-actions">
+        <button id="installBtn" class="icon-btn hidden" title="PWA o‘rnatish">＋</button>
+        <button id="notifyBtn" class="icon-btn" title="Bildirishnomalar">🔔</button>
+        <button id="settingsBtn" class="icon-btn" title="Sozlamalar">⚙</button>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="hero-grid">
+        <div class="live-column">
+          <div class="section-title-row">
+            <div>
+              <p class="eyebrow">VERTICAL CONTROL ROOM</p>
+              <h1>Shorts LIVE <span class="live-dot"></span></h1>
+            </div>
+            <div id="protectionBadge" class="protection-badge normal"><span></span> Shield ready</div>
+          </div>
+
+          <div class="phone-shell">
+            <div class="phone-top"><span>9:16</span><span id="qualityChip">720×1280</span><span id="networkChip">OFFLINE</span></div>
+            <div class="stage">
+              <video id="cameraVideo" playsinline muted class="source-video"></video>
+              <canvas id="portraitCanvas" width="720" height="1280"></canvas>
+              <div id="stageEmpty" class="stage-empty">
+                <div class="stage-icon">◉</div>
+                <b>Kamera tayyor emas</b>
+                <span>Preview’ni yoqing</span>
+              </div>
+              <div class="live-overlay top">
+                <span id="livePill" class="live-pill off">OFF AIR</span>
+                <span class="viewer-pill">◉ <b id="overlayViewers">0</b></span>
+              </div>
+              <div class="live-overlay bottom">
+                <div class="mini-signal"><span id="signalBars">▂▄▆█</span><small id="signalText">Ready</small></div>
+                <div id="riskMini" class="risk-mini">Risk 0%</div>
+              </div>
+            </div>
+            <div class="controls">
+              <button id="previewBtn" class="control-btn"><span>◉</span><small>Preview</small></button>
+              <button id="goLiveBtn" class="go-live-btn"><span>LIVE</span></button>
+              <button id="stopBtn" class="control-btn danger" disabled><span>■</span><small>Stop</small></button>
+            </div>
+          </div>
+
+          <div class="quick-actions">
+            <button id="evidenceBtn" class="action-card"><span>📸</span><div><b>Dalil saqlash</b><small>Hozirgi statistikani incident qiladi</small></div></button>
+            <button id="reportBtn" class="action-card alert"><span>🚨</span><div><b>Report markazi</b><small>Support-ready hisobot</small></div></button>
+          </div>
+        </div>
+
+        <div class="dash-column">
+          <div class="stats-grid">
+            <article class="stat-card glass accent"><span class="stat-label">Concurrent</span><strong id="statConcurrent">0</strong><small id="statConcurrentSub">YouTube API kutilmoqda</small></article>
+            <article class="stat-card glass"><span class="stat-label">Total views</span><strong id="statViews">0</strong><small>live video</small></article>
+            <article class="stat-card glass"><span class="stat-label">Likes</span><strong id="statLikes">0</strong><small>engagement signal</small></article>
+            <article class="stat-card glass risk-card"><span class="stat-label">Attack risk</span><div class="risk-line"><strong id="statRisk">0%</strong><span id="riskDot" class="risk-dot"></span></div><small id="riskReason">normal</small></article>
+          </div>
+
+          <section class="panel glass">
+            <div class="panel-head"><div><p class="eyebrow">REAL-TIME</p><h2>Viewer anomaly</h2></div><span id="monitorStatus" class="status-chip offline">API OFF</span></div>
+            <canvas id="chartCanvas" width="900" height="280"></canvas>
+            <div class="chart-legend"><span><i class="legend-dot viewer"></i>Concurrent</span><span><i class="legend-dot threshold"></i>Risk</span></div>
+          </section>
+
+          <section class="panel glass">
+            <div class="panel-head"><div><p class="eyebrow">SHIELD ENGINE</p><h2>Himoya holati</h2></div><span id="engineStatus" class="status-chip">READY</span></div>
+            <div class="shield-list">
+              <div><span class="ok-dot"></span><b>Growth-rate detector</b><small>10 soniyalik sakrashlarni tekshiradi</small></div>
+              <div><span class="ok-dot"></span><b>Baseline comparison</b><small>Oldingi real trafik bilan solishtiradi</small></div>
+              <div><span class="ok-dot"></span><b>Engagement cross-check</b><small>Viewer va like o‘sishini solishtiradi</small></div>
+              <div><span class="ok-dot"></span><b>Evidence recorder</b><small>Vaqt, risk va spike’ni MongoDB’da saqlaydi</small></div>
+            </div>
+          </section>
+
+          <section class="panel glass incidents-panel">
+            <div class="panel-head"><div><p class="eyebrow">INCIDENTS</p><h2>Shubhali trafik tarixi</h2></div><button id="refreshIncidents" class="text-btn">Yangilash</button></div>
+            <div id="incidentList" class="incident-list"><div class="empty">Hali incident yo‘q.</div></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <nav class="bottom-nav">
+      <button class="active" data-scroll="top"><span>◉</span><small>Live</small></button>
+      <button data-scroll="chart"><span>⌁</span><small>Analytics</small></button>
+      <button data-scroll="incidents"><span>⚠</span><small>Hujumlar</small></button>
+      <button id="navSettings"><span>⚙</span><small>Settings</small></button>
+    </nav>
+  </div>
+
+  <dialog id="settingsDialog" class="modal">
+    <form method="dialog" class="modal-card glass" id="settingsForm">
+      <div class="modal-head"><div><p class="eyebrow">CONFIGURATION</p><h2>LIVE sozlamalari</h2></div><button value="cancel" class="close-btn">×</button></div>
+      <div class="field-grid">
+        <label>YouTube video ID<input id="videoIdInput" placeholder="Masalan: dQw4w9WgXcQ" /></label>
+        <label>Channel ID (ixtiyoriy)<input id="channelIdInput" placeholder="UC..." /></label>
+        <label class="full">YouTube Stream Key<input id="streamKeyInput" type="password" placeholder="Kiritilsa serverda AES bilan shifrlanadi" /><small id="streamKeyState">Saqlanmagan</small></label>
+        <label class="full">YouTube Data API key<input id="apiKeyInput" type="password" placeholder="Realtime viewer monitoring uchun" /><small id="apiKeyState">Saqlanmagan</small></label>
+        <label>Vertikal sifat<select id="qualityInput"><option value="540x960">540×960 — Lite</option><option value="720x1280">720×1280 — Tavsiya</option><option value="1080x1920">1080×1920 — Full HD</option></select></label>
+        <label>Risk threshold<input id="riskThresholdInput" type="number" min="50" max="99" value="75" /></label>
+      </div>
+      <div class="modal-note">YouTube Stream Key va API key brauzerga qayta ko‘rsatilmaydi. LIVE vertikal 9:16 kodlanadi. Scheduled stream Shorts vertical feed’da ko‘rinmasligi mumkin.</div>
+      <div class="modal-actions"><button value="cancel" class="btn ghost">Bekor</button><button id="saveSettingsBtn" value="default" class="btn primary">Saqlash</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="reportDialog" class="modal">
+    <div class="modal-card glass report-card">
+      <div class="modal-head"><div><p class="eyebrow">REPORT CENTER</p><h2>Suspicious traffic report</h2></div><button id="closeReport" class="close-btn">×</button></div>
+      <textarea id="reportText" readonly></textarea>
+      <div class="modal-note">Bu lokal detector xulosasi. YouTube invalid traffic’ni o‘z serverlarida tasdiqlaydi; platforma avtomatik abuse-report yubormaydi.</div>
+      <div class="modal-actions"><button id="copyReportBtn" class="btn ghost">Nusxalash</button><button id="openSupportBtn" class="btn primary">YouTube Support</button></div>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
