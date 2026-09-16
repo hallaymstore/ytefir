@@ -18,10 +18,12 @@
     <div class="login-card glass">
       <div class="brand big"><span class="brand-mark">YT</span><span>Shield <b>Live</b></span></div>
       <p class="muted">Vertical LIVE • Shorts Feed • Traffic Shield</p>
+      <a class="btn primary wide" href="/auth/youtube" style="margin:12px 0 10px;text-decoration:none;text-align:center">▶ YouTube bilan kirish</a>
+      <p class="muted" style="font-size:12px;text-align:center;margin:4px 0 12px">Kanal OAuth orqali avtomatik ulanadi</p>
       <form id="loginForm">
-        <label>Login<input id="loginUser" autocomplete="username" value="admin" required /></label>
+        <label>Admin login<input id="loginUser" autocomplete="username" value="admin" required /></label>
         <label>Parol<input id="loginPass" type="password" autocomplete="current-password" required /></label>
-        <button class="btn primary wide" type="submit">Kirish</button>
+        <button class="btn ghost wide" type="submit">Admin orqali kirish</button>
         <div id="loginError" class="form-error"></div>
       </form>
     </div>
@@ -123,15 +125,23 @@
   <dialog id="settingsDialog" class="modal">
     <form method="dialog" class="modal-card glass" id="settingsForm">
       <div class="modal-head"><div><p class="eyebrow">CONFIGURATION</p><h2>LIVE sozlamalari</h2></div><button value="cancel" class="close-btn">×</button></div>
+      <div class="modal-note" style="margin-bottom:14px">
+        <b>▶ YouTube OAuth</b><br />
+        Kanalni ulang — Channel ID, monitoring va LIVE ulanishi avtomatik tayyorlanadi.
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <a href="/auth/youtube" class="btn primary" style="text-decoration:none">YouTube kanalni ulash</a>
+          <a href="/auth/youtube/prepare" class="btn ghost" style="text-decoration:none">LIVE tayyorlash</a>
+        </div>
+      </div>
       <div class="field-grid">
-        <label>YouTube video ID<input id="videoIdInput" placeholder="Masalan: dQw4w9WgXcQ" /></label>
-        <label>Channel ID (ixtiyoriy)<input id="channelIdInput" placeholder="UC..." /></label>
-        <label class="full">YouTube Stream Key<input id="streamKeyInput" type="password" placeholder="Kiritilsa serverda AES bilan shifrlanadi" /><small id="streamKeyState">Saqlanmagan</small></label>
-        <label class="full">YouTube Data API key<input id="apiKeyInput" type="password" placeholder="Realtime viewer monitoring uchun" /><small id="apiKeyState">Saqlanmagan</small></label>
+        <label>YouTube video ID<input id="videoIdInput" placeholder="OAuth avtomatik to‘ldiradi" /></label>
+        <label>Channel ID<input id="channelIdInput" placeholder="OAuth avtomatik to‘ldiradi" /></label>
+        <label class="full">YouTube Stream Key<input id="streamKeyInput" type="password" placeholder="OAuth bo‘lmasa qo‘lda fallback" /><small id="streamKeyState">Saqlanmagan</small></label>
+        <label class="full">YouTube Data API key<input id="apiKeyInput" type="password" placeholder="OAuth bo‘lmasa qo‘lda fallback" /><small id="apiKeyState">Saqlanmagan</small></label>
         <label>Vertikal sifat<select id="qualityInput"><option value="540x960">540×960 — Lite</option><option value="720x1280">720×1280 — Tavsiya</option><option value="1080x1920">1080×1920 — Full HD</option></select></label>
         <label>Risk threshold<input id="riskThresholdInput" type="number" min="50" max="99" value="75" /></label>
       </div>
-      <div class="modal-note">YouTube Stream Key va API key brauzerga qayta ko‘rsatilmaydi. LIVE vertikal 9:16 kodlanadi. Scheduled stream Shorts vertical feed’da ko‘rinmasligi mumkin.</div>
+      <div class="modal-note">Tavsiya: OAuth ishlating. Manual Stream Key/API key faqat fallback uchun. LIVE vertikal 9:16 kodlanadi; Shorts/vertical feed tarqalishini YouTube algoritmi belgilaydi.</div>
       <div class="modal-actions"><button value="cancel" class="btn ghost">Bekor</button><button id="saveSettingsBtn" value="default" class="btn primary">Saqlash</button></div>
     </form>
   </dialog>
