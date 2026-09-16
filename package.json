@@ -1,13 +1,13 @@
 {
   "name": "yt-shield-live",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Vertical YouTube LIVE control room, PWA and anomaly monitoring for suspicious traffic.",
   "type": "module",
   "engines": { "node": ">=20" },
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node --import ./oauth-bootstrap.js server.js",
+    "dev": "node --watch --import ./oauth-bootstrap.js server.js"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
