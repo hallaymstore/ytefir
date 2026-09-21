@@ -162,7 +162,7 @@ async function readChannel(token) {
 async function listBroadcasts(token, status = 'active') {
   // YouTube treats mine / broadcastStatus / id as mutually-exclusive primary filters.
   // Fetch this authenticated channel's broadcasts with mine=true, then filter locally.
-  const data = await youtube('liveBroadcasts?part=id,snippet,contentDetails,status&mine=true&broadcastType=all&maxResults=50', token);
+  const data = await youtube('liveBroadcasts?part=id,snippet,contentDetails,status&mine=true&maxResults=50', token);
   const items = data.items || [];
   const activeStates = new Set(['live', 'liveStarting', 'testing', 'testStarting']);
   const upcomingStates = new Set(['created', 'ready']);
