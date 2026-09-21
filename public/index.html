@@ -81,13 +81,14 @@
               <label class="full">Tavsif
                 <textarea id="liveDescription" rows="2" maxlength="5000" placeholder="Efir haqida qisqa ma’lumot"></textarea>
               </label>
-              <label>Sifat
-                <select id="quality">
-                  <option value="540x960">540×960 Lite</option>
-                  <option value="720x1280" selected>720×1280</option>
-                  <option value="1080x1920">1080×1920</option>
-                </select>
-              </label>
+              <div class="shorts-mode-box">
+                <div>
+                  <span class="eyebrow">SHORTS LIVE MODE</span>
+                  <b>9:16 • 720×1280 • 30 FPS</b>
+                  <small>Instant / unscheduled vertical LIVE. Sifat avtomatik.</small>
+                </div>
+                <span id="shortsReadyBadge" class="status">CHECKING</span>
+              </div>
               <label>Latency
                 <select id="latency">
                   <option value="ultraLow" selected>Ultra low</option>
@@ -230,16 +231,25 @@
       <label>Risk threshold
         <input id="riskThreshold" type="number" min="50" max="99" value="75">
       </label>
-      <label>Default sifat
-        <select id="settingsQuality">
-          <option value="540x960">540×960</option>
-          <option value="720x1280">720×1280</option>
-          <option value="1080x1920">1080×1920</option>
-        </select>
-      </label>
-      <div class="settings-note">YouTube kanal OAuth orqali boshqariladi. API key, Channel ID, Video ID yoki Stream Key qo‘lda kiritilmaydi.</div>
+      <div class="settings-note"><b>Shorts LIVE:</b> 9:16, 720×1280, 30 FPS rejimi majburiy. YouTube kanal OAuth orqali boshqariladi; API key, Channel ID, Video ID va Stream Key qo‘lda kiritilmaydi.</div>
       <button class="btn primary wide" type="submit">Saqlash</button>
     </form>
+  </dialog>
+
+  <dialog id="shortsSetupDialog" class="modal">
+    <div class="modal-card glass shorts-setup-card">
+      <div class="section-head">
+        <div><span class="eyebrow">SHORTS LIVE</span><h2>Instant LIVE tayyorlash</h2></div>
+        <button id="closeShortsSetup" class="close-btn">×</button>
+      </div>
+      <div class="shorts-setup-icon">9:16</div>
+      <p class="shorts-setup-text">YouTube API yangi unscheduled broadcast yarata olmaydi. YouTube Studio’da <b>Stream now / Go live</b> oynasini bir marta tayyorlang. Kanal ID yoki Stream Key kiritmaysiz — qaytganingizda YT Shield uni OAuth orqali avtomatik topadi.</p>
+      <div class="settings-note">Muhim: kelajak vaqtiga Schedule qilmang. Instant / Stream now rejimida qoldiring.</div>
+      <div class="modal-actions shorts-setup-actions">
+        <button id="checkShortsReady" class="btn ghost">Qayta tekshirish</button>
+        <button id="openStudioLive" class="btn primary">YouTube Studio ochish</button>
+      </div>
+    </div>
   </dialog>
 
   <dialog id="reportDialog" class="modal">
