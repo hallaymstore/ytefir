@@ -447,6 +447,9 @@ function htmlError(res, title, message, status = 500) {
 }
 
 function mountRoutes(app) {
+  // Routes are mounted before server.js middleware, so parse our JSON bodies here.
+  app.use(express.json({ limit: '1mb' }));
+
   app.get('/auth/youtube', (req, res) => {
     if (!oauthConfigured()) return htmlError(res, 'YouTube OAuth sozlanmagan', 'Google OAuth credentials serverga ulanmagan.', 503);
     const state = crypto.randomBytes(24).toString('base64url');
