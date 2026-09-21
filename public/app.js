@@ -23,6 +23,7 @@ let chatSeen = new Set();
 let chatPollMs = 5000;
 let latestSupportUrl = 'https://support.google.com/youtube/gethelp';
 let latestReport = '';
+let shortsStudioUrl = 'https://studio.youtube.com/';
 
 function toast(text) {
   const el = $('#toast');
@@ -43,6 +44,7 @@ async function api(url, options = {}) {
   if (!res.ok) {
     const err = new Error(data?.error || data || `HTTP ${res.status}`);
     err.status = res.status;
+    err.data = data && typeof data === 'object' ? data : {};
     throw err;
   }
   return data;
@@ -98,47 +100,37 @@ $('#disconnectBtn').addEventListener('click', async () => {
 
 async function loadConfig() {
   config = await api('/api/config');
-  const q = config.quality || '720x1280';
-  $('#quality').value = q;
-  $('#settingsQuality').value = q;
+  config.quality = '720x1280';
   $('#riskThreshold').value = config.riskThreshold || 75;
   $('#autoProtect').checked = Boolean(config.autoProtect);
-  applyCanvasQuality(q);
+  applyCanvasQuality();
 }
 async function saveAppSettings(silent = false) {
-  const quality = $('#quality').value || $('#settingsQuality').value || '720x1280';
   const riskThreshold = Number($('#riskThreshold').value || config?.riskThreshold || 75);
   const autoProtect = Boolean($('#autoProtect').checked);
   await api('/api/config', {
     method:'PUT',
-    body:{ quality, riskThreshold, autoProtect }
+    body:{ quality:'720x1280', riskThreshold, autoProtect }
   });
-  config = { ...(config || {}), quality, riskThreshold, autoProtect };
-  $('#settingsQuality').value = quality;
-  applyCanvasQuality(quality);
+  config = { ...(config || {}), quality:'720x1280', riskThreshold, autoProtect };
+  applyCanvasQuality();
   if (!silent) toast('Sozlamalar saqlandi');
 }
 $('#settingsBtn').addEventListener('click', () => $('#settingsDialog').showModal());
 $('#bottomSettings').addEventListener('click', () => $('#settingsDialog').showModal());
 $('#settingsForm').addEventListener('submit', async e => {
   e.preventDefault();
-  $('#quality').value = $('#settingsQuality').value;
   try {
     await saveAppSettings();
     $('#settingsDialog').close();
   } catch (err) { toast(err.message); }
 });
-$('#quality').addEventListener('change', () => {
-  $('#settingsQuality').value = $('#quality').value;
-  applyCanvasQuality($('#quality').value);
-});
 $('#autoProtect').addEventListener('change', () => saveAppSettings(true).catch(() => {}));
 
-function applyCanvasQuality(q) {
-  const [w,h] = String(q || '720x1280').split('x').map(Number);
-  canvas.width = w || 720;
-  canvas.height = h || 1280;
-  $('#qualityChip').textContent = `${canvas.width}×${canvas.height}`;
+function applyCanvasQuality() {
+  canvas.width = 720;
+  canvas.height = 1280;
+  $('#qualityChip').textContent = '720×1280';
 }
 
 function connectSocket() {
@@ -268,7 +260,7 @@ async function startLive() {
     if (!sourceStream && !(await startPreview())) return;
     await saveAppSettings(true);
 
-    $('#liveStateBadge').textContent = 'CREATING';
+    $('#liveStateBadge').textContent = 'CHECKING SHORTS';
     const live = await api('/api/youtube/live/ensure', {
       method:'POST',
       body:{
@@ -276,7 +268,7 @@ async function startLive() {
         description: $('#liveDescription').value.trim(),
         privacyStatus:'public',
         latencyPreference:$('#latency').value,
-        quality:$('#quality').value
+        quality:'720x1280'
       }
     });
     currentBroadcast = live.broadcast || null;
@@ -284,12 +276,10 @@ async function startLive() {
     await loadConfig();
 
     connectSocket();
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      await new Promise(r => setTimeout(r,1200));
-    }
+    if (!socket || socket.readyState !== WebSocket.OPEN) await new Promise(r => setTimeout(r,1200));
     if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('Server websocket ulanmagan');
 
-    socket.send(JSON.stringify({type:'start-ingest',quality:$('#quality').value,fps:30}));
+    socket.send(JSON.stringify({type:'start-ingest',quality:'720x1280',fps:30}));
     const ready = await waitForIngestReady();
     if (!ready.ok) throw new Error(ready.error || 'RTMP boshlanmadi');
 
@@ -298,7 +288,7 @@ async function startLive() {
     const mimeType = types.find(x => MediaRecorder.isTypeSupported(x)) || '';
     recorder = new MediaRecorder(
       portraitStream,
-      mimeType ? {mimeType,videoBitsPerSecond:3500000,audioBitsPerSecond:128000} : undefined
+      mimeType ? {mimeType,videoBitsPerSecond:3200000,audioBitsPerSecond:128000} : undefined
     );
     recorder.addEventListener('dataavailable', async e => {
       if (!e.data?.size || socket?.readyState !== WebSocket.OPEN) return;
@@ -311,16 +301,32 @@ async function startLive() {
     renderIngestState(true);
     $('#liveStateBadge').textContent = 'STARTING';
     $('#liveStateBadge').className = 'status live';
-    toast('YouTube’ga 9:16 LIVE yuborilmoqda');
-    setTimeout(pollYoutubeStatus, 3500);
-    startChatPolling();
+    toast('Shorts LIVE oqimi YouTube’ga yuborilmoqda');
+
+    // YouTube transition only after its ingest reports ACTIVE.
+    api('/api/youtube/live/transition',{method:'POST'})
+      .then(() => {
+        toast('SHORTS LIVE boshlandi');
+        pollYoutubeStatus();
+        startChatPolling();
+      })
+      .catch(err => {
+        console.warn('transition', err);
+        toast(err.message || 'YouTube LIVE transition xatosi');
+      });
   } catch (err) {
-    toast(err.message || 'LIVE boshlanmadi');
+    try { socket?.send(JSON.stringify({type:'stop-ingest'})); } catch {}
+    stopLocalOnly();
+    if (err.status === 409 && err.data?.code === 'SHORTS_SETUP_REQUIRED') {
+      shortsStudioUrl = err.data?.studioUrl || shortsStudioUrl;
+      showShortsSetup();
+    } else {
+      toast(err.message || 'SHORTS LIVE boshlanmadi');
+    }
     $('#liveStateBadge').textContent = 'READY';
     $('#liveStateBadge').className = 'status';
-    try { socket?.send(JSON.stringify({type:'stop-ingest'})); } catch {}
   } finally {
-    $('#goLiveBtn').disabled = false;
+    if (!streaming) $('#goLiveBtn').disabled = false;
   }
 }
 $('#goLiveBtn').addEventListener('click', startLive);
@@ -361,9 +367,20 @@ function renderIngestState(active) {
 async function pollYoutubeStatus() {
   try {
     const s = await api('/api/youtube/live/status');
+    shortsStudioUrl = s.studioUrl || shortsStudioUrl;
     const b = s.broadcast;
     const st = s.stream;
-    currentBroadcast = b || currentBroadcast;
+    currentBroadcast = b || null;
+
+    const readyBadge = $('#shortsReadyBadge');
+    if (s.shortsReady && b?.instant) {
+      readyBadge.textContent = 'SHORTS READY';
+      readyBadge.className = 'status ok';
+    } else {
+      readyBadge.textContent = 'SETUP NEEDED';
+      readyBadge.className = 'status';
+    }
+
     if (b) {
       $('#liveStateBadge').textContent = (b.lifeCycleStatus || 'READY').toUpperCase();
       $('#liveStateBadge').className = `status ${b.lifeCycleStatus === 'live' ? 'live' : ''}`;
@@ -373,11 +390,14 @@ async function pollYoutubeStatus() {
       if (b.lifeCycleStatus === 'complete') stopChatPolling();
       $('#emergencyBtn').textContent = b.privacyStatus === 'unlisted' ? 'Restore Public' : 'Emergency Unlisted';
     } else {
-      $('#liveStateBadge').textContent = 'READY';
+      $('#liveStateBadge').textContent = 'SHORTS SETUP';
       $('#liveStateBadge').className = 'status';
-      $('#streamHealth').textContent = 'Ready';
+      $('#streamHealth').textContent = 'Instant LIVE kerak';
     }
-  } catch {}
+    return s;
+  } catch {
+    return null;
+  }
 }
 
 async function emergencyUnlisted(silent=false) {
@@ -543,6 +563,34 @@ $('#evidenceBtn').addEventListener('click',async()=>{
 $('#closeReport').addEventListener('click',()=>$('#reportDialog').close());
 $('#copyReport').addEventListener('click',async()=>{await navigator.clipboard.writeText($('#reportText').value||'');toast('Report nusxalandi')});
 $('#openSupport').addEventListener('click',()=>window.open(latestSupportUrl,'_blank','noopener'));
+
+
+function showShortsSetup() {
+  const d = $('#shortsSetupDialog');
+  if (d && !d.open) d.showModal();
+}
+$('#closeShortsSetup')?.addEventListener('click', () => $('#shortsSetupDialog').close());
+$('#openStudioLive')?.addEventListener('click', () => {
+  window.open(shortsStudioUrl, '_blank', 'noopener');
+});
+$('#checkShortsReady')?.addEventListener('click', async () => {
+  const st = await pollYoutubeStatus();
+  if (st?.shortsReady && st?.broadcast?.instant) {
+    $('#shortsSetupDialog').close();
+    toast('Instant SHORTS LIVE topildi — GO LIVE bosing');
+  } else {
+    toast('Hali instant LIVE topilmadi');
+  }
+});
+window.addEventListener('focus', () => {
+  setTimeout(async () => {
+    const st = await pollYoutubeStatus();
+    if (st?.shortsReady && st?.broadcast?.instant && $('#shortsSetupDialog')?.open) {
+      $('#shortsSetupDialog').close();
+      toast('Shorts LIVE tayyor');
+    }
+  }, 900);
+});
 
 async function registerPwa() {
   if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
