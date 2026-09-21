@@ -278,14 +278,20 @@ async function startLive() {
         startChatPolling();
         pollYoutubeStatus();
       })
-      .catch(err => toast(err.message || 'LIVE transition xatosi'));
+      .catch(err => {
+        if (err.data?.code === 'STREAM_NOW_NOT_CREATED') {
+          $('#shortsBadge').textContent = 'WATCH PAGE YO‘Q';
+          $('#shortsBadge').style.color = '#ffbd66';
+        }
+        toast(err.message || 'LIVE transition xatosi');
+      });
   } catch (err) {
     try { socket?.send(JSON.stringify({type:'stop-ingest'})); } catch {}
     stopLocalOnly();
-    if (err.status === 409 && err.data?.code === 'SHORTS_SETUP_REQUIRED') {
-      $('#shortsBadge').textContent = 'SHORTS SETUP YO‘Q';
+    if (err.status === 409 && err.data?.code === 'STREAM_NOW_NOT_CREATED') {
+      $('#shortsBadge').textContent = 'WATCH PAGE YO‘Q';
       $('#shortsBadge').style.color = '#ffbd66';
-      toast('YouTube API kanal uchun instant Shorts broadcast bermadi');
+      toast('Oqim ketdi, lekin YouTube watch page yaratmadi');
     } else {
       toast(err.message || 'LIVE boshlanmadi');
     }
@@ -332,8 +338,8 @@ async function pollYoutubeStatus() {
   try {
     const s = await api('/api/youtube/live/status');
     currentBroadcast = s.broadcast || null;
-    const ready = Boolean(s.shortsReady && s.broadcast?.instant);
-    $('#shortsBadge').textContent = ready ? 'SHORTS READY' : 'SHORTS CHECK';
+    const ready = Boolean(s.shortsReady);
+    $('#shortsBadge').textContent = ready ? (s.broadcast ? 'SHORTS READY' : 'STREAM READY') : 'SHORTS CHECK';
     $('#shortsBadge').style.color = ready ? '#4be09a' : 'rgba(255,255,255,.7)';
     $('#liveModeText').textContent = ready ? 'SHORTS • 9:16 • READY' : 'SHORTS • 9:16';
     if (s.broadcast?.title && !$('#liveTitle').value) $('#liveTitle').value = s.broadcast.title;
