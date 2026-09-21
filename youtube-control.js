@@ -186,6 +186,19 @@ async function getStream(token, id) {
 async function getBoundStream(token, broadcast) {
   return broadcast?.contentDetails?.boundStreamId ? getStream(token, broadcast.contentDetails.boundStreamId) : null;
 }
+async function listOwnedStreams(token) {
+  const data = await youtube('liveStreams?part=id,snippet,cdn,status,contentDetails&mine=true&maxResults=50', token);
+  return data.items || [];
+}
+function streamHasKey(stream) {
+  return Boolean(stream?.cdn?.ingestionInfo?.streamName);
+}
+async function findReusableStream(token) {
+  const streams = await listOwnedStreams(token);
+  return streams.find(x => x.contentDetails?.isReusable && streamHasKey(x))
+    || streams.find(streamHasKey)
+    || null;
+}
 function resolutionForQuality(quality) {
   if (String(quality).startsWith('1080')) return '1080p';
   return '720p';
@@ -238,17 +251,20 @@ async function syncCurrentLive(token, channel) {
   const all = await listBroadcasts(token, 'all');
   const instant = all.filter(isRunnableBroadcast).filter(isInstantBroadcast);
   const broadcast = instant.find(isActiveBroadcast) || instant.find(x => x.status?.lifeCycleStatus === 'ready') || instant[0] || null;
-  const stream = broadcast ? await getBoundStream(token, broadcast) : null;
-  const streamName = stream?.cdn?.ingestionInfo?.streamName || '';
 
+  let stream = broadcast ? await getBoundStream(token, broadcast) : null;
+  if (!stream) stream = await findReusableStream(token);
+
+  const streamName = stream?.cdn?.ingestionInfo?.streamName || '';
   const patch = {
     channelId: channel.id,
     youtubeApiKeyEnc: encrypt(OAUTH_MAGIC_KEY),
     quality: '720x1280'
   };
-  // Never keep a stale scheduled broadcast in Shorts-only mode.
-  patch.videoId = broadcast?.id || '';
-  patch.streamKeyEnc = streamName ? encrypt(streamName) : '';
+  if (broadcast?.id) patch.videoId = broadcast.id;
+  else patch.videoId = '';
+  // Keep the Studio/reusable stream key even before a watch-page broadcast exists.
+  if (streamName) patch.streamKeyEnc = encrypt(streamName);
   await updateSettingDoc(patch);
 
   await saveOAuthDoc({
@@ -258,7 +274,8 @@ async function syncCurrentLive(token, channel) {
     activeBroadcastId: broadcast?.id || '',
     activeStreamId: stream?.id || '',
     liveChatId: broadcast?.snippet?.liveChatId || '',
-    shortsReady: Boolean(broadcast),
+    shortsReady: Boolean(streamName),
+    streamOnlyReady: Boolean(streamName && !broadcast),
     shortsUpdatedAt: new Date()
   });
 
@@ -266,67 +283,63 @@ async function syncCurrentLive(token, channel) {
     broadcast,
     stream,
     streamName,
-    shortsReady: Boolean(broadcast),
+    shortsReady: Boolean(streamName),
+    streamOnlyReady: Boolean(streamName && !broadcast),
     studioUrl: studioLiveUrl(channel.id)
   };
 }
 
 async function createLive(token, opts = {}) {
   const channel = await readChannel(token);
-  const all = await listBroadcasts(token, 'all');
-  const instant = all.filter(isRunnableBroadcast).filter(isInstantBroadcast);
-  let broadcast = instant.find(isActiveBroadcast) || instant.find(x => x.status?.lifeCycleStatus === 'ready') || instant[0] || null;
+  const synced = await syncCurrentLive(token, channel);
+  let broadcast = synced.broadcast;
+  let stream = synced.stream;
 
-  if (!broadcast) {
-    const err = new Error('SHORTS LIVE uchun unscheduled / instant broadcast topilmadi. YouTube Studio’da Stream now rejimini bir marta tayyorlang.');
-    err.code = 'SHORTS_SETUP_REQUIRED';
-    err.status = 409;
-    err.studioUrl = studioLiveUrl(channel.id);
-    throw err;
-  }
-
-  await updateVideoMetadata(token, broadcast.id, opts).catch(err => {
-    console.warn('[metadata update]', err.message || err);
-  });
-
-  if (opts.privacyStatus && ['public','unlisted','private'].includes(opts.privacyStatus) && broadcast.status?.privacyStatus !== opts.privacyStatus) {
-    try {
-      broadcast = await youtube('liveBroadcasts?part=status', token, {
-        method: 'PUT',
-        body: JSON.stringify({
-          id: broadcast.id,
-          status: {
-            privacyStatus: opts.privacyStatus,
-            selfDeclaredMadeForKids: Boolean(broadcast.status?.selfDeclaredMadeForKids)
-          }
-        })
-      });
-    } catch (err) {
-      console.warn('[privacy update]', err.message || err);
-    }
-  }
-
-  let stream = await getBoundStream(token, broadcast);
-  if (!stream) {
+  if (!stream || !streamHasKey(stream)) {
+    // API-created reusable stream is enough for app-side encoder start.
+    // If YouTube later creates the watch page from Stream-now, we discover it automatically.
     stream = await youtube('liveStreams?part=id,snippet,cdn,status,contentDetails', token, {
       method: 'POST',
       body: JSON.stringify({
-        snippet: { title: `YT Shield Shorts 9:16 • ${Date.now()}` },
+        snippet: { title: 'YT Shield Shorts 9:16' },
         cdn: { frameRate: '30fps', ingestionType: 'rtmp', resolution: '720p' },
-        contentDetails: { isReusable: false }
+        contentDetails: { isReusable: true }
       })
     });
-    await youtube(`liveBroadcasts/bind?id=${encodeURIComponent(broadcast.id)}&streamId=${encodeURIComponent(stream.id)}&part=id,snippet,contentDetails,status`, token, { method: 'POST' });
-    broadcast = await getBroadcast(token, broadcast.id) || broadcast;
-    stream = await getStream(token, stream.id) || stream;
   }
 
   const streamName = stream?.cdn?.ingestionInfo?.streamName;
-  if (!streamName) throw new Error('YouTube instant stream key qaytarmadi');
+  if (!streamName) throw new Error('YouTube stream key qaytarmadi');
+
+  // If an instant broadcast already exists, bind this stream if necessary and update metadata.
+  if (broadcast) {
+    const boundId = broadcast.contentDetails?.boundStreamId;
+    if (!boundId) {
+      await youtube(`liveBroadcasts/bind?id=${encodeURIComponent(broadcast.id)}&streamId=${encodeURIComponent(stream.id)}&part=id,snippet,contentDetails,status`, token, { method: 'POST' });
+      broadcast = await getBroadcast(token, broadcast.id) || broadcast;
+    }
+    await updateVideoMetadata(token, broadcast.id, opts).catch(err => console.warn('[metadata update]', err.message || err));
+    if (opts.privacyStatus && ['public','unlisted','private'].includes(opts.privacyStatus) && broadcast.status?.privacyStatus !== opts.privacyStatus) {
+      try {
+        broadcast = await youtube('liveBroadcasts?part=status', token, {
+          method: 'PUT',
+          body: JSON.stringify({
+            id: broadcast.id,
+            status: {
+              privacyStatus: opts.privacyStatus,
+              selfDeclaredMadeForKids: Boolean(broadcast.status?.selfDeclaredMadeForKids)
+            }
+          })
+        });
+      } catch (err) {
+        console.warn('[privacy update]', err.message || err);
+      }
+    }
+  }
 
   await updateSettingDoc({
     channelId: channel.id,
-    videoId: broadcast.id,
+    videoId: broadcast?.id || '',
     streamKeyEnc: encrypt(streamName),
     youtubeApiKeyEnc: encrypt(OAUTH_MAGIC_KEY),
     quality: '720x1280'
@@ -335,28 +348,74 @@ async function createLive(token, opts = {}) {
     channelId: channel.id,
     channelTitle: channel.title,
     channelThumbnail: channel.thumbnail,
-    activeBroadcastId: broadcast.id,
+    activeBroadcastId: broadcast?.id || '',
     activeStreamId: stream.id,
-    liveChatId: broadcast.snippet?.liveChatId || '',
+    liveChatId: broadcast?.snippet?.liveChatId || '',
     shortsReady: true,
+    streamOnlyReady: Boolean(!broadcast),
+    pendingTitle: clampText(opts.title, 100),
+    pendingDescription: clampText(opts.description, 5000),
     shortsUpdatedAt: new Date()
   });
 
-  return { channel, broadcast, stream, reused: true, shorts: true, studioUrl: studioLiveUrl(channel.id) };
+  return {
+    channel,
+    broadcast,
+    stream,
+    reused: true,
+    shorts: true,
+    streamOnly: Boolean(!broadcast),
+    awaitingWatchPage: Boolean(!broadcast),
+    studioUrl: studioLiveUrl(channel.id)
+  };
 }
 
 async function currentContext(token) {
   const channel = await readChannel(token);
-  const synced = await syncCurrentLive(token, channel);
-  const broadcast = synced.broadcast;
-  const stream = broadcast ? (synced.stream || await getBoundStream(token, broadcast)) : null;
+  const activeAll = await listBroadcasts(token, 'active');
+  let broadcast = activeAll.find(isActiveBroadcast) || null;
+
+  if (!broadcast) {
+    const synced = await syncCurrentLive(token, channel);
+    broadcast = synced.broadcast;
+    const stream = broadcast ? (synced.stream || await getBoundStream(token, broadcast)) : synced.stream;
+    return {
+      broadcast,
+      stream,
+      chatId: broadcast?.snippet?.liveChatId || '',
+      channel,
+      shortsReady: Boolean(synced.streamName),
+      studioUrl: synced.studioUrl
+    };
+  }
+
+  let stream = await getBoundStream(token, broadcast);
+  if (!stream) stream = await findReusableStream(token);
+  const streamName = stream?.cdn?.ingestionInfo?.streamName || '';
+  if (streamName) {
+    await updateSettingDoc({
+      channelId: channel.id,
+      videoId: broadcast.id,
+      streamKeyEnc: encrypt(streamName),
+      youtubeApiKeyEnc: encrypt(OAUTH_MAGIC_KEY),
+      quality: '720x1280'
+    });
+  }
+  await saveOAuthDoc({
+    channelId: channel.id,
+    channelTitle: channel.title,
+    channelThumbnail: channel.thumbnail,
+    activeBroadcastId: broadcast.id,
+    activeStreamId: stream?.id || '',
+    liveChatId: broadcast.snippet?.liveChatId || ''
+  });
   return {
     broadcast,
     stream,
-    chatId: broadcast?.snippet?.liveChatId || '',
+    chatId: broadcast.snippet?.liveChatId || '',
     channel,
-    shortsReady: Boolean(broadcast),
-    studioUrl: synced.studioUrl
+    shortsReady: Boolean(streamName),
+    studioUrl: studioLiveUrl(channel.id)
   };
 }
 
@@ -393,37 +452,74 @@ async function updatePrivacy(token, privacyStatus) {
 
 
 async function transitionCurrentLive(token) {
-  let { broadcast, stream, studioUrl: setupUrl } = await currentContext(token);
-  if (!broadcast || !stream) {
-    const err = new Error('SHORTS LIVE tayyor emas');
-    err.code = 'SHORTS_SETUP_REQUIRED';
+  let ctx = await currentContext(token);
+  let broadcast = ctx.broadcast;
+  let stream = ctx.stream;
+
+  if (!stream) {
+    const err = new Error('YouTube stream topilmadi');
     err.status = 409;
-    err.studioUrl = setupUrl;
     throw err;
   }
-  if (['live','liveStarting'].includes(broadcast.status?.lifeCycleStatus)) return { ok: true, broadcast, alreadyLive: true };
 
-  // Wait until YouTube is actually receiving RTMP packets.
-  const deadline = Date.now() + 35000;
-  while (Date.now() < deadline) {
+  // Wait for our RTMP encoder to become active first.
+  const streamDeadline = Date.now() + 30000;
+  while (Date.now() < streamDeadline) {
     stream = await getStream(token, stream.id) || stream;
     if (stream.status?.streamStatus === 'active') break;
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await new Promise(resolve => setTimeout(resolve, 1200));
   }
   if (stream.status?.streamStatus !== 'active') {
-    const err = new Error('YouTube hali video oqimini qabul qilgani yo‘q. Internet/encoder holatini tekshiring.');
+    const err = new Error('YouTube hali 9:16 video oqimini qabul qilgani yo‘q');
     err.status = 409;
     throw err;
   }
 
-  broadcast = await getBroadcast(token, broadcast.id) || broadcast;
-  if (['live','liveStarting'].includes(broadcast.status?.lifeCycleStatus)) return { ok: true, broadcast, alreadyLive: true };
+  // Stream-now can create the watch page only after encoder packets arrive.
+  if (!broadcast) {
+    const watchDeadline = Date.now() + 35000;
+    while (Date.now() < watchDeadline) {
+      const active = await listBroadcasts(token, 'active');
+      broadcast = active.find(isActiveBroadcast) || null;
+      if (broadcast) break;
 
+      const all = await listBroadcasts(token, 'all');
+      const instant = all.filter(isRunnableBroadcast).filter(isInstantBroadcast);
+      broadcast = instant.find(isActiveBroadcast) || instant.find(x => x.status?.lifeCycleStatus === 'ready') || instant[0] || null;
+      if (broadcast) break;
+      await new Promise(resolve => setTimeout(resolve, 1400));
+    }
+  }
+
+  if (!broadcast) {
+    const err = new Error('Oqim YouTube’ga yetdi, lekin YouTube Stream-now watch page yaratmadi');
+    err.code = 'STREAM_NOW_NOT_CREATED';
+    err.status = 409;
+    throw err;
+  }
+
+  const doc = await getOAuthDoc().catch(() => null);
+  await updateVideoMetadata(token, broadcast.id, {
+    title: doc?.pendingTitle || '',
+    description: doc?.pendingDescription || ''
+  }).catch(err => console.warn('[pending metadata]', err.message || err));
+
+  broadcast = await getBroadcast(token, broadcast.id) || broadcast;
+  if (['live','liveStarting'].includes(broadcast.status?.lifeCycleStatus)) {
+    await saveOAuthDoc({ activeBroadcastId: broadcast.id, liveChatId: broadcast.snippet?.liveChatId || '' });
+    return { ok:true, broadcast, stream, alreadyLive:true };
+  }
+
+  // If YouTube created a ready/testing watch page, transition it now.
   const out = await youtube(`liveBroadcasts/transition?broadcastStatus=live&id=${encodeURIComponent(broadcast.id)}&part=id,snippet,status,contentDetails`, token, {
     method: 'POST'
   });
-  await saveOAuthDoc({ activeBroadcastId: broadcast.id, activeStreamId: stream.id, liveChatId: out?.snippet?.liveChatId || '' });
-  return { ok: true, broadcast: out, stream };
+  await saveOAuthDoc({
+    activeBroadcastId: broadcast.id,
+    activeStreamId: stream.id,
+    liveChatId: out?.snippet?.liveChatId || ''
+  });
+  return { ok:true, broadcast:out, stream };
 }
 
 async function liveStatus(token) {
@@ -634,13 +730,15 @@ function mountRoutes(app) {
         ok: true,
         reused: result.reused,
         channel: result.channel,
-        broadcast: {
+        broadcast: result.broadcast ? {
           id: result.broadcast?.id || '',
           title: result.broadcast?.snippet?.title || '',
           status: result.broadcast?.status?.lifeCycleStatus || '',
           privacyStatus: result.broadcast?.status?.privacyStatus || '',
           liveChatId: result.broadcast?.snippet?.liveChatId || ''
-        }
+        } : null,
+        streamOnly: Boolean(result.streamOnly),
+        awaitingWatchPage: Boolean(result.awaitingWatchPage)
       });
     } catch (err) {
       res.status(err.status || 500).json({
