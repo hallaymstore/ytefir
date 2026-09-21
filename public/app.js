@@ -1,18 +1,10 @@
-const $ = (s) => document.querySelector(s);
-const loginView = $('#loginView');
+const $ = s => document.querySelector(s);
+
+const authView = $('#authView');
 const appView = $('#appView');
-const loginForm = $('#loginForm');
-const loginError = $('#loginError');
 const cameraVideo = $('#cameraVideo');
 const canvas = $('#portraitCanvas');
-const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
-const stageEmpty = $('#stageEmpty');
-const previewBtn = $('#previewBtn');
-const goLiveBtn = $('#goLiveBtn');
-const stopBtn = $('#stopBtn');
-const settingsDialog = $('#settingsDialog');
-const reportDialog = $('#reportDialog');
-const toastEl = $('#toast');
+const ctx = canvas.getContext('2d', { alpha:false, desynchronized:true });
 
 let config = null;
 let sourceStream = null;
@@ -21,221 +13,229 @@ let recorder = null;
 let socket = null;
 let drawing = false;
 let streaming = false;
-let installPrompt = null;
-let latestReport = '';
-let latestSupportUrl = 'https://support.google.com/youtube/gethelp';
-let monitorHistory = [];
 let ingestReadyResolver = null;
 let reconnectTimer = null;
+let monitorHistory = [];
+let currentBroadcast = null;
+let chatTimer = null;
+let chatPageToken = '';
+let chatSeen = new Set();
+let chatPollMs = 5000;
+let latestSupportUrl = 'https://support.google.com/youtube/gethelp';
+let latestReport = '';
 
 function toast(text) {
-  toastEl.textContent = text;
-  toastEl.classList.add('show');
-  clearTimeout(toastEl._t);
-  toastEl._t = setTimeout(() => toastEl.classList.remove('show'), 2600);
+  const el = $('#toast');
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 2800);
 }
-
 async function api(url, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (options.body && typeof options.body !== 'string') {
-    headers['Content-Type'] = 'application/json';
+    headers['content-type'] = 'application/json';
     options.body = JSON.stringify(options.body);
   }
-  const res = await fetch(url, { credentials: 'same-origin', ...options, headers });
-  if (res.status === 401) {
-    showLogin();
-    throw new Error('Unauthorized');
-  }
+  const res = await fetch(url, { credentials:'same-origin', ...options, headers });
   const type = res.headers.get('content-type') || '';
-  const data = type.includes('application/json') ? await res.json() : await res.text();
-  if (!res.ok) throw new Error(data?.error || data || `HTTP ${res.status}`);
+  const data = type.includes('application/json') ? await res.json().catch(() => ({})) : await res.text();
+  if (!res.ok) {
+    const err = new Error(data?.error || data || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
-
-function showLogin() {
-  loginView.classList.remove('hidden');
+function showAuth() {
+  authView.classList.remove('hidden');
   appView.classList.add('hidden');
 }
 function showApp() {
-  loginView.classList.add('hidden');
+  authView.classList.add('hidden');
   appView.classList.remove('hidden');
 }
 
-loginForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  loginError.textContent = '';
-  try {
-    await api('/api/auth/login', { method: 'POST', body: { username: $('#loginUser').value, password: $('#loginPass').value } });
-    $('#loginPass').value = '';
-    showApp();
-    await initDashboard();
-  } catch (err) {
-    loginError.textContent = err.message === 'Unauthorized' ? 'Login yoki parol xato' : err.message;
-  }
-});
-
-async function checkSession() {
+async function bootstrap() {
   try {
     await api('/api/auth/me');
     showApp();
-    await initDashboard();
+    await Promise.all([loadConfig(), loadChannel(), loadIncidents()]);
+    connectSocket();
+    registerPwa();
+    await pollYoutubeStatus();
+    setInterval(pollYoutubeStatus, 6000);
   } catch {
-    showLogin();
+    showAuth();
   }
 }
+bootstrap();
 
-async function initDashboard() {
-  await loadConfig();
-  connectSocket();
-  await Promise.allSettled([loadIncidents(), refreshStatus()]);
-  registerPwa();
+async function loadChannel() {
+  try {
+    const st = await api('/api/youtube/oauth-status');
+    if (!st.connected) {
+      showAuth();
+      return;
+    }
+    const ch = st.channel || {};
+    $('#channelTitle').textContent = ch.title || 'YouTube channel';
+    $('#channelMeta').textContent = [ch.customUrl, ch.subscribers ? `${fmt(ch.subscribers)} subscribers` : 'OAuth connected'].filter(Boolean).join(' • ');
+    $('#channelAvatar').src = ch.thumbnail || '/icon.svg';
+    $('#ytState').textContent = 'CONNECTED';
+    $('#ytState').className = 'status ok';
+  } catch (e) {
+    if (e.status === 401) showAuth();
+  }
 }
+$('#disconnectBtn').addEventListener('click', async () => {
+  if (!confirm('YouTube kanalni uzasizmi?')) return;
+  try {
+    await api('/api/youtube/disconnect', { method:'POST' });
+  } catch {}
+  location.href = '/';
+});
 
 async function loadConfig() {
   config = await api('/api/config');
-  $('#videoIdInput').value = config.videoId || '';
-  $('#channelIdInput').value = config.channelId || '';
-  $('#qualityInput').value = config.quality || '720x1280';
-  $('#riskThresholdInput').value = config.riskThreshold || 75;
-  $('#streamKeyInput').value = '';
-  $('#apiKeyInput').value = '';
-  $('#streamKeyState').textContent = config.hasStreamKey ? '✓ Serverda shifrlangan holda saqlangan' : 'Saqlanmagan';
-  $('#apiKeyState').textContent = config.hasApiKey ? '✓ API monitoring ulangan' : 'Saqlanmagan';
-  applyCanvasQuality(config.quality || '720x1280');
-  $('#qualityChip').textContent = (config.quality || '720x1280').replace('x', '×');
+  const q = config.quality || '720x1280';
+  $('#quality').value = q;
+  $('#settingsQuality').value = q;
+  $('#riskThreshold').value = config.riskThreshold || 75;
+  $('#autoProtect').checked = Boolean(config.autoProtect);
+  applyCanvasQuality(q);
 }
+async function saveAppSettings(silent = false) {
+  const quality = $('#quality').value || $('#settingsQuality').value || '720x1280';
+  const riskThreshold = Number($('#riskThreshold').value || config?.riskThreshold || 75);
+  const autoProtect = Boolean($('#autoProtect').checked);
+  await api('/api/config', {
+    method:'PUT',
+    body:{ quality, riskThreshold, autoProtect }
+  });
+  config = { ...(config || {}), quality, riskThreshold, autoProtect };
+  $('#settingsQuality').value = quality;
+  applyCanvasQuality(quality);
+  if (!silent) toast('Sozlamalar saqlandi');
+}
+$('#settingsBtn').addEventListener('click', () => $('#settingsDialog').showModal());
+$('#bottomSettings').addEventListener('click', () => $('#settingsDialog').showModal());
+$('#settingsForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  $('#quality').value = $('#settingsQuality').value;
+  try {
+    await saveAppSettings();
+    $('#settingsDialog').close();
+  } catch (err) { toast(err.message); }
+});
+$('#quality').addEventListener('change', () => {
+  $('#settingsQuality').value = $('#quality').value;
+  applyCanvasQuality($('#quality').value);
+});
+$('#autoProtect').addEventListener('change', () => saveAppSettings(true).catch(() => {}));
 
 function applyCanvasQuality(q) {
-  const [w, h] = q.split('x').map(Number);
+  const [w,h] = String(q || '720x1280').split('x').map(Number);
   canvas.width = w || 720;
   canvas.height = h || 1280;
+  $('#qualityChip').textContent = `${canvas.width}×${canvas.height}`;
 }
-
-$('#settingsBtn').addEventListener('click', openSettings);
-$('#navSettings').addEventListener('click', openSettings);
-function openSettings() {
-  loadConfig().catch(() => {});
-  settingsDialog.showModal();
-}
-
-$('#settingsForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  try {
-    await api('/api/config', {
-      method: 'PUT',
-      body: {
-        videoId: $('#videoIdInput').value.trim(),
-        channelId: $('#channelIdInput').value.trim(),
-        streamKey: $('#streamKeyInput').value.trim(),
-        youtubeApiKey: $('#apiKeyInput').value.trim(),
-        quality: $('#qualityInput').value,
-        riskThreshold: Number($('#riskThresholdInput').value || 75)
-      }
-    });
-    settingsDialog.close();
-    await loadConfig();
-    toast('Sozlamalar saqlandi');
-  } catch (err) {
-    toast(`Xato: ${err.message}`);
-  }
-});
 
 function connectSocket() {
   if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) return;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   socket = new WebSocket(`${proto}//${location.host}/ws`);
   socket.binaryType = 'arraybuffer';
-
   socket.addEventListener('open', () => {
-    $('#networkChip').textContent = 'CONNECTED';
-    $('#networkChip').style.color = '#64e6b3';
+    $('#networkChip').textContent = 'SERVER';
+    $('#networkChip').style.color = '#3dd598';
   });
-
-  socket.addEventListener('message', (e) => {
+  socket.addEventListener('message', e => {
     if (typeof e.data !== 'string') return;
-    let msg;
-    try { msg = JSON.parse(e.data); } catch { return; }
-
+    let msg; try { msg = JSON.parse(e.data); } catch { return; }
     if (msg.type === 'hello') {
-      if (msg.liveState?.monitor) renderMonitor(msg.liveState.monitor);
       renderIngestState(Boolean(msg.liveState?.ingestActive));
+      if (msg.liveState?.monitor) renderMonitor(msg.liveState.monitor);
     }
     if (msg.type === 'monitor') renderMonitor(msg.monitor);
     if (msg.type === 'monitor-error') {
       $('#monitorStatus').textContent = 'API ERROR';
-      $('#monitorStatus').className = 'status-chip offline';
+      $('#monitorStatus').className = 'status';
     }
     if (msg.type === 'incident') {
       loadIncidents();
-      showIncidentAlert(msg.incident);
+      toast(`Shubhali trafik: risk ${msg.incident?.risk || 0}%`);
+      if ($('#autoProtect').checked && Number(msg.incident?.risk || 0) >= 95) {
+        emergencyUnlisted(true).catch(() => {});
+      }
     }
     if (msg.type === 'ingest-ready') {
-      ingestReadyResolver?.({ ok: true, msg });
+      ingestReadyResolver?.({ok:true,msg});
       ingestReadyResolver = null;
     }
     if (msg.type === 'ingest-error') {
-      ingestReadyResolver?.({ ok: false, error: msg.error });
+      ingestReadyResolver?.({ok:false,error:msg.error});
       ingestReadyResolver = null;
-      toast(msg.error || 'LIVE ulanish xatosi');
+      toast(msg.error || 'Encoder xatosi');
     }
     if (msg.type === 'ingest-stopped') {
-      if (streaming) stopLiveLocal(false);
-      if (msg.lastError) console.warn('FFmpeg:', msg.lastError);
+      if (streaming) stopLocalOnly();
+      if (msg.lastError) console.warn(msg.lastError);
     }
     if (msg.type === 'live-state') renderIngestState(Boolean(msg.liveState?.ingestActive));
   });
-
   socket.addEventListener('close', () => {
     $('#networkChip').textContent = 'OFFLINE';
     $('#networkChip').style.color = '';
-    if (streaming) stopLiveLocal(false);
     clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(connectSocket, 2500);
+    reconnectTimer = setTimeout(connectSocket, 2200);
   });
 }
 
 async function startPreview() {
-  if (sourceStream) return;
+  if (sourceStream) return true;
   try {
     sourceStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      video:{
+        facingMode:'user',
+        width:{ideal:1920},
+        height:{ideal:1080},
+        frameRate:{ideal:30,max:30}
+      },
+      audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}
     });
     cameraVideo.srcObject = sourceStream;
     await cameraVideo.play();
-    stageEmpty.classList.add('hidden');
+    $('#stageEmpty').classList.add('hidden');
     drawing = true;
     drawPortrait();
-    previewBtn.querySelector('small').textContent = 'Camera ON';
+    $('#previewBtn').classList.add('active');
     toast('Kamera va mikrofon tayyor');
+    return true;
   } catch (err) {
-    toast(`Kamera xatosi: ${err.message}`);
+    toast(`Kamera: ${err.message}`);
+    return false;
   }
 }
-
 function stopPreview() {
   if (streaming) return;
   drawing = false;
   sourceStream?.getTracks().forEach(t => t.stop());
   sourceStream = null;
   cameraVideo.srcObject = null;
-  ctx.fillStyle = '#080c15';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  stageEmpty.classList.remove('hidden');
-  previewBtn.querySelector('small').textContent = 'Preview';
+  ctx.fillStyle = '#060910';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  $('#stageEmpty').classList.remove('hidden');
 }
-
-previewBtn.addEventListener('click', () => sourceStream ? stopPreview() : startPreview());
+$('#previewBtn').addEventListener('click', () => sourceStream ? stopPreview() : startPreview());
 
 function drawPortrait() {
   if (!drawing || !sourceStream) return;
   const vw = cameraVideo.videoWidth || 1280;
   const vh = cameraVideo.videoHeight || 720;
-  const dw = canvas.width;
-  const dh = canvas.height;
-  const srcAspect = vw / vh;
-  const dstAspect = dw / dh;
-  let sx = 0, sy = 0, sw = vw, sh = vh;
+  const dw = canvas.width, dh = canvas.height;
+  const srcAspect = vw / vh, dstAspect = dw / dh;
+  let sx=0,sy=0,sw=vw,sh=vh;
   if (srcAspect > dstAspect) {
     sw = vh * dstAspect;
     sx = (vw - sw) / 2;
@@ -243,310 +243,342 @@ function drawPortrait() {
     sh = vw / dstAspect;
     sy = (vh - sh) / 2;
   }
-  ctx.drawImage(cameraVideo, sx, sy, sw, sh, 0, 0, dw, dh);
+  ctx.drawImage(cameraVideo,sx,sy,sw,sh,0,0,dw,dh);
   requestAnimationFrame(drawPortrait);
 }
-
-function getPortraitStream() {
-  const capture = canvas.captureStream(30);
-  const audioTracks = sourceStream?.getAudioTracks() || [];
-  for (const track of audioTracks) capture.addTrack(track);
-  return capture;
+function portraitCapture() {
+  const s = canvas.captureStream(30);
+  for (const t of sourceStream?.getAudioTracks() || []) s.addTrack(t);
+  return s;
 }
-
-function waitForIngestReady(timeoutMs = 12000) {
-  return new Promise((resolve) => {
+function waitForIngestReady(timeout=15000) {
+  return new Promise(resolve => {
     const t = setTimeout(() => {
       ingestReadyResolver = null;
-      resolve({ ok: false, error: 'Server LIVE javobi kechikdi' });
-    }, timeoutMs);
-    ingestReadyResolver = (value) => {
-      clearTimeout(t);
-      resolve(value);
-    };
+      resolve({ok:false,error:'LIVE server javobi kechikdi'});
+    }, timeout);
+    ingestReadyResolver = v => { clearTimeout(t); resolve(v); };
   });
 }
 
 async function startLive() {
   if (streaming) return;
-  if (!sourceStream) await startPreview();
-  if (!sourceStream) return;
-  if (!config?.hasStreamKey) {
-    toast('Avval YouTube Stream Key kiriting');
-    openSettings();
-    return;
-  }
-  connectSocket();
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    toast('Server bilan ulanish kutilmoqda');
-    return;
-  }
-
-  goLiveBtn.disabled = true;
-  socket.send(JSON.stringify({ type: 'start-ingest', quality: config.quality, fps: 30 }));
-  const ready = await waitForIngestReady();
-  goLiveBtn.disabled = false;
-  if (!ready.ok) {
-    toast(ready.error || 'LIVE boshlanmadi');
-    return;
-  }
-
-  portraitStream = getPortraitStream();
-  const mimeCandidates = [
-    'video/webm;codecs=vp8,opus',
-    'video/webm;codecs=vp9,opus',
-    'video/webm'
-  ];
-  const mimeType = mimeCandidates.find(x => MediaRecorder.isTypeSupported(x)) || '';
+  $('#goLiveBtn').disabled = true;
   try {
-    recorder = new MediaRecorder(portraitStream, mimeType ? { mimeType, videoBitsPerSecond: 3500000, audioBitsPerSecond: 128000 } : undefined);
+    if (!sourceStream && !(await startPreview())) return;
+    await saveAppSettings(true);
+
+    $('#liveStateBadge').textContent = 'CREATING';
+    const live = await api('/api/youtube/live/ensure', {
+      method:'POST',
+      body:{
+        title: $('#liveTitle').value.trim(),
+        description: $('#liveDescription').value.trim(),
+        privacyStatus:'public',
+        latencyPreference:$('#latency').value,
+        quality:$('#quality').value
+      }
+    });
+    currentBroadcast = live.broadcast || null;
+    if (currentBroadcast?.title && !$('#liveTitle').value.trim()) $('#liveTitle').value = currentBroadcast.title;
+    await loadConfig();
+
+    connectSocket();
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      await new Promise(r => setTimeout(r,1200));
+    }
+    if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('Server websocket ulanmagan');
+
+    socket.send(JSON.stringify({type:'start-ingest',quality:$('#quality').value,fps:30}));
+    const ready = await waitForIngestReady();
+    if (!ready.ok) throw new Error(ready.error || 'RTMP boshlanmadi');
+
+    portraitStream = portraitCapture();
+    const types = ['video/webm;codecs=vp8,opus','video/webm;codecs=vp9,opus','video/webm'];
+    const mimeType = types.find(x => MediaRecorder.isTypeSupported(x)) || '';
+    recorder = new MediaRecorder(
+      portraitStream,
+      mimeType ? {mimeType,videoBitsPerSecond:3500000,audioBitsPerSecond:128000} : undefined
+    );
+    recorder.addEventListener('dataavailable', async e => {
+      if (!e.data?.size || socket?.readyState !== WebSocket.OPEN) return;
+      if (socket.bufferedAmount > 7 * 1024 * 1024) return;
+      socket.send(await e.data.arrayBuffer());
+    });
+    recorder.addEventListener('stop', () => portraitStream?.getTracks().forEach(t => t.stop()));
+    recorder.start(750);
+    streaming = true;
+    renderIngestState(true);
+    $('#liveStateBadge').textContent = 'STARTING';
+    $('#liveStateBadge').className = 'status live';
+    toast('YouTube’ga 9:16 LIVE yuborilmoqda');
+    setTimeout(pollYoutubeStatus, 3500);
+    startChatPolling();
   } catch (err) {
-    socket.send(JSON.stringify({ type: 'stop-ingest' }));
-    toast(`Encoder xatosi: ${err.message}`);
-    return;
+    toast(err.message || 'LIVE boshlanmadi');
+    $('#liveStateBadge').textContent = 'READY';
+    $('#liveStateBadge').className = 'status';
+    try { socket?.send(JSON.stringify({type:'stop-ingest'})); } catch {}
+  } finally {
+    $('#goLiveBtn').disabled = false;
   }
-
-  recorder.addEventListener('dataavailable', async (e) => {
-    if (!e.data?.size || socket?.readyState !== WebSocket.OPEN) return;
-    if (socket.bufferedAmount > 5 * 1024 * 1024) return;
-    const buf = await e.data.arrayBuffer();
-    socket.send(buf);
-  });
-  recorder.addEventListener('stop', () => portraitStream?.getTracks().forEach(t => t.stop()));
-  recorder.start(1000);
-  streaming = true;
-  renderIngestState(true);
-  toast('YouTube RTMPS LIVE boshlandi');
 }
+$('#goLiveBtn').addEventListener('click', startLive);
 
-goLiveBtn.addEventListener('click', startLive);
-stopBtn.addEventListener('click', () => stopLiveLocal(true));
-
-function stopLiveLocal(sendStop = true) {
-  if (sendStop && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'stop-ingest' }));
+async function stopLive() {
+  if (!streaming && !currentBroadcast) return;
+  $('#stopBtn').disabled = true;
+  try {
+    await api('/api/youtube/live/complete',{method:'POST'}).catch(() => null);
+  } finally {
+    try { socket?.send(JSON.stringify({type:'stop-ingest'})); } catch {}
+    stopLocalOnly();
+    stopChatPolling();
+    currentBroadcast = null;
+    toast('LIVE yakunlandi');
+    setTimeout(pollYoutubeStatus,1500);
+  }
+}
+$('#stopBtn').addEventListener('click', stopLive);
+function stopLocalOnly() {
   try { if (recorder?.state !== 'inactive') recorder?.stop(); } catch {}
   recorder = null;
   portraitStream?.getTracks().forEach(t => t.stop());
   portraitStream = null;
   streaming = false;
   renderIngestState(false);
-  toast('LIVE to‘xtatildi');
 }
-
 function renderIngestState(active) {
-  const livePill = $('#livePill');
-  livePill.textContent = active ? '● LIVE' : 'OFF AIR';
-  livePill.classList.toggle('off', !active);
-  goLiveBtn.classList.toggle('streaming', active);
-  goLiveBtn.querySelector('span').textContent = active ? 'ON AIR' : 'LIVE';
-  stopBtn.disabled = !active;
-  previewBtn.disabled = active;
-  $('#engineStatus').textContent = active ? 'LIVE' : 'READY';
+  $('#livePill').textContent = active ? '● LIVE' : 'OFF AIR';
+  $('#livePill').classList.toggle('off',!active);
+  $('#goLiveBtn').classList.toggle('streaming',active);
+  $('#goLiveBtn').textContent = active ? 'ON AIR' : 'GO LIVE';
+  $('#goLiveBtn').disabled = active;
+  $('#stopBtn').disabled = !active;
+  $('#previewBtn').disabled = active;
 }
 
-async function refreshStatus() {
+async function pollYoutubeStatus() {
   try {
-    const s = await api('/api/live/status');
-    renderIngestState(Boolean(s.ingestActive));
-    renderMonitor(s.monitor || {});
+    const s = await api('/api/youtube/live/status');
+    const b = s.broadcast;
+    const st = s.stream;
+    currentBroadcast = b || currentBroadcast;
+    if (b) {
+      $('#liveStateBadge').textContent = (b.lifeCycleStatus || 'READY').toUpperCase();
+      $('#liveStateBadge').className = `status ${b.lifeCycleStatus === 'live' ? 'live' : ''}`;
+      $('#streamHealth').textContent = st?.healthStatus ? `${st.streamStatus} • ${st.healthStatus}` : (st?.streamStatus || b.lifeCycleStatus || 'Ready');
+      if (b.title && !$('#liveTitle').value) $('#liveTitle').value = b.title;
+      if (b.lifeCycleStatus === 'live') startChatPolling();
+      if (b.lifeCycleStatus === 'complete') stopChatPolling();
+      $('#emergencyBtn').textContent = b.privacyStatus === 'unlisted' ? 'Restore Public' : 'Emergency Unlisted';
+    } else {
+      $('#liveStateBadge').textContent = 'READY';
+      $('#liveStateBadge').className = 'status';
+      $('#streamHealth').textContent = 'Ready';
+    }
   } catch {}
 }
-setInterval(refreshStatus, 15000);
+
+async function emergencyUnlisted(silent=false) {
+  const current = currentBroadcast?.privacyStatus || 'public';
+  const next = current === 'unlisted' ? 'public' : 'unlisted';
+  if (!silent && next === 'unlisted' && !confirm('LIVE public tavsiyalardan yashiriladi. Davom etilsinmi?')) return;
+  try {
+    await api('/api/youtube/live/privacy',{method:'POST',body:{privacyStatus:next}});
+    if (currentBroadcast) currentBroadcast.privacyStatus = next;
+    $('#emergencyBtn').textContent = next === 'unlisted' ? 'Restore Public' : 'Emergency Unlisted';
+    toast(next === 'unlisted' ? 'LIVE Unlisted himoya rejimiga o‘tdi' : 'LIVE yana Public');
+  } catch (err) { toast(err.message); }
+}
+$('#emergencyBtn').addEventListener('click', () => emergencyUnlisted(false));
 
 function fmt(n) {
   n = Number(n || 0);
-  return new Intl.NumberFormat('en-US', { notation: n >= 1000000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(n);
+  return new Intl.NumberFormat('en-US',{notation:n>=1000000?'compact':'standard',maximumFractionDigits:1}).format(n);
 }
-
-function renderMonitor(m) {
-  const concurrent = Number(m.concurrent || 0);
-  const views = Number(m.views || 0);
-  const likes = Number(m.likes || 0);
-  const risk = Number(m.risk || 0);
+function renderMonitor(m={}) {
+  const concurrent = Number(m.concurrent || 0), views=Number(m.views || 0), likes=Number(m.likes || 0), risk=Number(m.risk || 0);
   $('#statConcurrent').textContent = fmt(concurrent);
   $('#overlayViewers').textContent = fmt(concurrent);
   $('#statViews').textContent = fmt(views);
   $('#statLikes').textContent = fmt(likes);
   $('#statRisk').textContent = `${risk}%`;
   $('#riskMini').textContent = `Risk ${risk}%`;
-  $('#riskReason').textContent = (m.reasons || []).slice(0, 2).join(' • ') || 'normal';
-  $('#statConcurrentSub').textContent = m.connected ? 'real-time concurrent viewers' : 'YouTube API kutilmoqda';
+  $('#riskReason').textContent = (m.reasons || []).slice(0,2).join(' • ') || 'normal';
   $('#monitorStatus').textContent = m.connected ? 'API LIVE' : 'API OFF';
-  $('#monitorStatus').className = `status-chip ${m.connected ? 'online' : 'offline'}`;
-
-  const riskDot = $('#riskDot');
-  const badge = $('#protectionBadge');
-  if (risk >= 75) {
-    riskDot.style.background = '#ff3158';
-    badge.className = 'protection-badge danger';
-    badge.innerHTML = '<span></span> Possible attack';
-  } else if (risk >= 45) {
-    riskDot.style.background = '#ffb84c';
-    badge.className = 'protection-badge warn';
-    badge.innerHTML = '<span></span> Suspicious';
-  } else {
-    riskDot.style.background = '#38d996';
-    badge.className = 'protection-badge normal';
-    badge.innerHTML = '<span></span> Shield active';
-  }
-
+  $('#monitorStatus').className = `status ${m.connected?'ok':''}`;
   if (m.updatedAt) {
-    monitorHistory.push({ t: new Date(m.updatedAt).getTime(), viewers: concurrent, risk });
-    if (monitorHistory.length > 60) monitorHistory = monitorHistory.slice(-60);
+    monitorHistory.push({t:new Date(m.updatedAt).getTime(),viewers:concurrent,risk});
+    if (monitorHistory.length > 80) monitorHistory = monitorHistory.slice(-80);
     drawChart();
   }
 }
-
 function drawChart() {
   const c = $('#chartCanvas');
-  const rect = c.getBoundingClientRect();
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  c.width = Math.max(500, Math.round(rect.width * dpr));
-  c.height = Math.max(220, Math.round(rect.height * dpr));
-  const x = c.getContext('2d');
-  const W = c.width, H = c.height;
-  x.clearRect(0, 0, W, H);
-  const pad = 24 * dpr;
-  x.strokeStyle = 'rgba(255,255,255,.06)';
-  x.lineWidth = 1;
-  for (let i = 0; i < 5; i++) {
-    const y = pad + ((H - pad * 2) / 4) * i;
-    x.beginPath(); x.moveTo(pad, y); x.lineTo(W - pad, y); x.stroke();
-  }
-  if (monitorHistory.length < 2) return;
-  const maxV = Math.max(10, ...monitorHistory.map(v => v.viewers)) * 1.08;
-  const points = monitorHistory.map((p, i) => ({
-    px: pad + (i / (monitorHistory.length - 1)) * (W - pad * 2),
-    py: H - pad - (p.viewers / maxV) * (H - pad * 2),
-    ry: H - pad - (p.risk / 100) * (H - pad * 2)
+  const box = c.getBoundingClientRect();
+  const dpr = Math.min(devicePixelRatio || 1,2);
+  c.width = Math.max(500,Math.round(box.width*dpr));
+  c.height = Math.max(230,Math.round(box.height*dpr));
+  const g = c.getContext('2d');
+  g.clearRect(0,0,c.width,c.height);
+  const pad = 34*dpr, W=c.width-pad*2, H=c.height-pad*1.6;
+  g.strokeStyle='rgba(255,255,255,.06)';g.lineWidth=1;
+  for(let i=0;i<5;i++){const y=pad+(H/4)*i;g.beginPath();g.moveTo(pad,y);g.lineTo(pad+W,y);g.stroke()}
+  if (monitorHistory.length<2) return;
+  const maxV=Math.max(10,...monitorHistory.map(x=>x.viewers));
+  const pts=monitorHistory.map((x,i)=>({
+    x:pad+(i/(monitorHistory.length-1))*W,
+    y:pad+H-(x.viewers/maxV)*H,
+    ry:pad+H-(x.risk/100)*H
   }));
-  const gradient = x.createLinearGradient(0, pad, 0, H - pad);
-  gradient.addColorStop(0, 'rgba(76,145,255,.3)');
-  gradient.addColorStop(1, 'rgba(76,145,255,0)');
-  x.beginPath();
-  x.moveTo(points[0].px, H - pad);
-  points.forEach(p => x.lineTo(p.px, p.py));
-  x.lineTo(points.at(-1).px, H - pad);
-  x.closePath(); x.fillStyle = gradient; x.fill();
-  x.beginPath(); points.forEach((p, i) => i ? x.lineTo(p.px, p.py) : x.moveTo(p.px, p.py));
-  x.strokeStyle = '#6099ff'; x.lineWidth = 2.2 * dpr; x.stroke();
-  x.beginPath(); points.forEach((p, i) => i ? x.lineTo(p.px, p.ry) : x.moveTo(p.px, p.ry));
-  x.strokeStyle = 'rgba(255,70,103,.9)'; x.lineWidth = 1.5 * dpr; x.stroke();
+  g.strokeStyle='#6d8cff';g.lineWidth=2.2*dpr;g.beginPath();pts.forEach((p,i)=>i?g.lineTo(p.x,p.y):g.moveTo(p.x,p.y));g.stroke();
+  g.strokeStyle='rgba(255,73,108,.8)';g.lineWidth=1.6*dpr;g.beginPath();pts.forEach((p,i)=>i?g.lineTo(p.x,p.ry):g.moveTo(p.x,p.ry));g.stroke();
 }
-window.addEventListener('resize', () => requestAnimationFrame(drawChart));
+addEventListener('resize',()=>requestAnimationFrame(drawChart));
+
+function startChatPolling() {
+  if (chatTimer) return;
+  chatPageToken='';
+  chatSeen.clear();
+  $('#chatState').textContent='LIVE';
+  $('#chatState').className='status ok';
+  pollChat();
+}
+function stopChatPolling() {
+  clearTimeout(chatTimer);
+  chatTimer=null;
+  chatPageToken='';
+  $('#chatState').textContent='WAITING';
+  $('#chatState').className='status';
+}
+async function pollChat() {
+  clearTimeout(chatTimer);
+  try {
+    const q = chatPageToken ? `?pageToken=${encodeURIComponent(chatPageToken)}` : '';
+    const data = await api(`/api/youtube/chat/messages${q}`);
+    chatPageToken = data.nextPageToken || chatPageToken;
+    chatPollMs = Math.max(2000,Number(data.pollingIntervalMillis || 5000));
+    appendChat(data.items || []);
+  } catch (err) {
+    if (!/ended|disabled|topilmadi/i.test(err.message)) console.warn('chat',err.message);
+  }
+  chatTimer=setTimeout(pollChat,chatPollMs);
+}
+function appendChat(items) {
+  const list=$('#chatList');
+  if (!items.length && !chatSeen.size) return;
+  if (!chatSeen.size) list.innerHTML='';
+  for(const m of items){
+    if(chatSeen.has(m.id)) continue;
+    chatSeen.add(m.id);
+    const row=document.createElement('div');row.className='chat-msg';row.dataset.id=m.id;row.dataset.channel=m.author?.channelId||'';
+    const img=document.createElement('img');img.src=m.author?.avatar||'/icon.svg';img.alt='';
+    const body=document.createElement('div');
+    const name=document.createElement('div');name.className='name';name.textContent=m.author?.name||'User';
+    if(m.author?.owner||m.author?.moderator||m.author?.member){const em=document.createElement('em');em.textContent=m.author.owner?'OWNER':m.author.moderator?'MOD':'MEMBER';name.appendChild(em)}
+    const p=document.createElement('p');p.textContent=m.text||'';
+    body.append(name,p);
+    const tools=document.createElement('div');tools.className='chat-tools';
+    if(!m.author?.owner){
+      const del=document.createElement('button');del.type='button';del.textContent='Delete';del.dataset.action='delete';
+      const ban=document.createElement('button');ban.type='button';ban.textContent='5m';ban.dataset.action='ban';
+      tools.append(del,ban);
+    }
+    row.append(img,body,tools);list.appendChild(row);
+  }
+  while(list.children.length>160) list.firstElementChild?.remove();
+  list.scrollTop=list.scrollHeight;
+}
+$('#chatList').addEventListener('click',async e=>{
+  const btn=e.target.closest('button[data-action]');if(!btn)return;
+  const row=btn.closest('.chat-msg');if(!row)return;
+  try{
+    if(btn.dataset.action==='delete'){
+      await api(`/api/youtube/chat/messages/${encodeURIComponent(row.dataset.id)}`,{method:'DELETE'});
+      row.remove();
+    }else{
+      await api('/api/youtube/chat/ban',{method:'POST',body:{channelId:row.dataset.channel,seconds:300}});
+      row.remove();toast('User 5 daqiqaga bloklandi');
+    }
+  }catch(err){toast(err.message)}
+});
+$('#chatForm').addEventListener('submit',async e=>{
+  e.preventDefault();const input=$('#chatInput');const text=input.value.trim();if(!text)return;
+  try{await api('/api/youtube/chat/send',{method:'POST',body:{text}});input.value='';setTimeout(pollChat,500)}catch(err){toast(err.message)}
+});
 
 async function loadIncidents() {
   try {
-    const items = await api('/api/incidents');
-    const list = $('#incidentList');
-    if (!items.length) {
-      list.innerHTML = '<div class="empty">Hali incident yo‘q.</div>';
-      return;
+    const items=await api('/api/incidents');
+    const list=$('#incidentList');
+    list.innerHTML='';
+    if(!items.length){list.innerHTML='<div class="empty">Incident yo‘q.</div>';return}
+    for(const x of items){
+      const row=document.createElement('div');row.className=`incident ${x.severity||''}`;
+      const dot=document.createElement('span');dot.className='dot';
+      const body=document.createElement('div');
+      const b=document.createElement('b');b.textContent=`Risk ${x.risk||0}% • ${fmt(x.concurrent)} viewer`;
+      const sm=document.createElement('small');sm.textContent=`${new Date(x.ts).toLocaleString()} • ${(x.reasons||[]).slice(0,2).join(' • ')}`;
+      body.append(b,sm);
+      const btn=document.createElement('button');btn.textContent='Report';btn.addEventListener('click',()=>openIncidentReport(x._id));
+      row.append(dot,body,btn);list.appendChild(row);
     }
-    list.innerHTML = items.map(i => {
-      const t = new Date(i.ts).toLocaleString();
-      const cls = i.severity === 'critical' ? 'incident critical' : 'incident';
-      const reason = (i.reasons || []).join(' • ') || 'manual evidence';
-      return `<div class="${cls}"><div class="incident-icon">${i.severity === 'critical' ? '!' : '⚠'}</div><div class="incident-main"><b>${i.risk || 0}% risk • ${fmt(i.concurrent)} viewer</b><small>${t} • ${escapeHtml(reason)}</small></div><button data-report-id="${i._id}">Report</button></div>`;
-    }).join('');
-    list.querySelectorAll('[data-report-id]').forEach(btn => btn.addEventListener('click', () => openIncidentReport(btn.dataset.reportId)));
   } catch {}
 }
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>'"]/g, ch => ({ '&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;' }[ch]));
-}
-
-$('#refreshIncidents').addEventListener('click', loadIncidents);
-
 async function openIncidentReport(id) {
   try {
-    const data = await api(`/api/incidents/${id}/report`);
-    latestReport = data.reportText;
-    latestSupportUrl = data.supportUrl || latestSupportUrl;
-    $('#reportText').value = latestReport;
-    reportDialog.showModal();
-  } catch (err) { toast(err.message); }
+    const d=await api(`/api/incidents/${id}/report`);
+    latestReport=d.reportText||'';latestSupportUrl=d.supportUrl||latestSupportUrl;
+    $('#reportText').value=latestReport;$('#reportDialog').showModal();
+  }catch(err){toast(err.message)}
 }
-
-async function captureManualEvidence(openReport = false) {
-  try {
-    const data = await api('/api/incidents/manual', { method: 'POST', body: {} });
-    latestReport = data.incident.reportText;
-    latestSupportUrl = data.supportUrl || latestSupportUrl;
-    await loadIncidents();
-    toast('Dalil MongoDB’da saqlandi');
-    if (openReport) {
-      $('#reportText').value = latestReport;
-      reportDialog.showModal();
-    }
-  } catch (err) { toast(err.message); }
-}
-
-$('#evidenceBtn').addEventListener('click', () => captureManualEvidence(false));
-$('#reportBtn').addEventListener('click', () => captureManualEvidence(true));
-$('#closeReport').addEventListener('click', () => reportDialog.close());
-$('#copyReportBtn').addEventListener('click', async () => {
-  await navigator.clipboard.writeText($('#reportText').value);
-  toast('Report nusxalandi');
+$('#evidenceBtn').addEventListener('click',async()=>{
+  try{
+    const d=await api('/api/incidents/manual',{method:'POST'});
+    latestReport=d.incident?.reportText||'';latestSupportUrl=d.supportUrl||latestSupportUrl;
+    await loadIncidents();toast('Dalil saqlandi');
+  }catch(err){toast(err.message)}
 });
-$('#openSupportBtn').addEventListener('click', () => window.open(latestSupportUrl, '_blank', 'noopener,noreferrer'));
-
-function showIncidentAlert(incident) {
-  toast(`⚠ ${incident.risk}% risk: shubhali trafik aniqlandi`);
-  if (Notification.permission === 'granted') {
-    try { new Notification('YT Shield — shubhali trafik', { body: `${incident.risk}% risk • ${fmt(incident.concurrent)} viewer`, icon: '/icon.svg' }); } catch {}
-  }
-}
+$('#closeReport').addEventListener('click',()=>$('#reportDialog').close());
+$('#copyReport').addEventListener('click',async()=>{await navigator.clipboard.writeText($('#reportText').value||'');toast('Report nusxalandi')});
+$('#openSupport').addEventListener('click',()=>window.open(latestSupportUrl,'_blank','noopener'));
 
 async function registerPwa() {
-  if ('serviceWorker' in navigator) {
-    try { await navigator.serviceWorker.register('/sw.js'); } catch {}
-  }
+  if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+}
+$('#notifyBtn').addEventListener('click',async()=>{
+  try{
+    if(!('Notification' in window)) throw new Error('Notification qo‘llanmaydi');
+    const p=await Notification.requestPermission();
+    if(p!=='granted') throw new Error('Notification ruxsati berilmadi');
+    await subscribePush();
+    toast('Bildirishnomalar yoqildi');
+  }catch(err){toast(err.message)}
+});
+async function subscribePush() {
+  const cfg=config||await api('/api/config');
+  if(!cfg.vapidPublicKey) return;
+  const reg=await navigator.serviceWorker.ready;
+  let sub=await reg.pushManager.getSubscription();
+  if(!sub) sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlBase64ToUint8Array(cfg.vapidPublicKey)});
+  await api('/api/push/subscribe',{method:'POST',body:sub.toJSON()});
+}
+function urlBase64ToUint8Array(base64String){
+  const padding='='.repeat((4-base64String.length%4)%4);
+  const base64=(base64String+padding).replace(/-/g,'+').replace(/_/g,'/');
+  const raw=atob(base64);return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
 }
 
-$('#notifyBtn').addEventListener('click', async () => {
-  if (!('Notification' in window)) return toast('Bu brauzer notification’ni qo‘llamaydi');
-  const permission = await Notification.requestPermission();
-  if (permission !== 'granted') return toast('Notification ruxsati berilmadi');
-  if (!config?.vapidPublicKey || !('serviceWorker' in navigator)) return toast('Lokal notification yoqildi');
-  try {
-    const reg = await navigator.serviceWorker.ready;
-    let sub = await reg.pushManager.getSubscription();
-    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(config.vapidPublicKey) });
-    await api('/api/push/subscribe', { method: 'POST', body: sub.toJSON() });
-    toast('Push notification yoqildi');
-  } catch (err) {
-    toast(`Push xatosi: ${err.message}`);
-  }
-});
+document.querySelectorAll('.bottom-nav button[data-target]').forEach(btn=>btn.addEventListener('click',()=>{
+  document.querySelectorAll('.bottom-nav button').forEach(x=>x.classList.remove('active'));btn.classList.add('active');
+  const t=btn.dataset.target;
+  if(t==='live') document.querySelector('.composer')?.scrollIntoView({behavior:'smooth',block:'start'});
+  if(t==='chat') document.querySelector('.chat-panel')?.scrollIntoView({behavior:'smooth',block:'start'});
+  if(t==='shield') document.querySelector('.right-col')?.scrollIntoView({behavior:'smooth',block:'start'});
+}));
 
-function urlBase64ToUint8Array(base64String) {
-  const padding = '='.repeat((4 - base64String.length % 4) % 4);
-  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const rawData = atob(base64);
-  return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
+const params=new URLSearchParams(location.search);
+if(params.get('youtube')){
+  history.replaceState({},'',location.pathname);
 }
-
-window.addEventListener('beforeinstallprompt', (e) => {
-  e.preventDefault();
-  installPrompt = e;
-  $('#installBtn').classList.remove('hidden');
-});
-$('#installBtn').addEventListener('click', async () => {
-  if (!installPrompt) return;
-  installPrompt.prompt();
-  await installPrompt.userChoice;
-  installPrompt = null;
-  $('#installBtn').classList.add('hidden');
-});
-
-$('.bottom-nav [data-scroll="top"]').addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
-$('.bottom-nav [data-scroll="chart"]').addEventListener('click', () => $('#chartCanvas').scrollIntoView({ behavior: 'smooth', block: 'center' }));
-$('.bottom-nav [data-scroll="incidents"]').addEventListener('click', () => $('.incidents-panel').scrollIntoView({ behavior: 'smooth', block: 'center' }));
-
-window.addEventListener('beforeunload', () => {
-  if (streaming && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'stop-ingest' }));
-});
-
-checkSession();
