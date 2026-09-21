@@ -160,17 +160,27 @@ async function readChannel(token) {
 }
 
 async function listBroadcasts(token, status = 'active') {
-  const data = await youtube(`liveBroadcasts?part=id,snippet,contentDetails,status&broadcastStatus=${encodeURIComponent(status)}&mine=true&maxResults=25`, token);
-  return data.items || [];
+  // YouTube treats mine / broadcastStatus / id as mutually-exclusive primary filters.
+  // Fetch this authenticated channel's broadcasts with mine=true, then filter locally.
+  const data = await youtube('liveBroadcasts?part=id,snippet,contentDetails,status&mine=true&broadcastType=all&maxResults=50', token);
+  const items = data.items || [];
+  const activeStates = new Set(['live', 'liveStarting', 'testing', 'testStarting']);
+  const upcomingStates = new Set(['created', 'ready']);
+  if (status === 'active') return items.filter(x => activeStates.has(x.status?.lifeCycleStatus));
+  if (status === 'upcoming') return items.filter(x => upcomingStates.has(x.status?.lifeCycleStatus));
+  if (status === 'completed') return items.filter(x => x.status?.lifeCycleStatus === 'complete');
+  return items;
 }
 async function getBroadcast(token, id) {
   if (!id) return null;
-  const data = await youtube(`liveBroadcasts?part=id,snippet,contentDetails,status&id=${encodeURIComponent(id)}&mine=true`, token);
+  // id is the sole primary filter for this request.
+  const data = await youtube(`liveBroadcasts?part=id,snippet,contentDetails,status&id=${encodeURIComponent(id)}`, token);
   return data.items?.[0] || null;
 }
 async function getStream(token, id) {
   if (!id) return null;
-  const data = await youtube(`liveStreams?part=id,snippet,cdn,status,contentDetails&id=${encodeURIComponent(id)}&mine=true`, token);
+  // id is the sole primary filter for this request.
+  const data = await youtube(`liveStreams?part=id,snippet,cdn,status,contentDetails&id=${encodeURIComponent(id)}`, token);
   return data.items?.[0] || null;
 }
 async function getBoundStream(token, broadcast) {
