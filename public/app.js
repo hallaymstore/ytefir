@@ -267,7 +267,6 @@ async function startLive() {
         title: $('#liveTitle').value.trim(),
         description: $('#liveDescription').value.trim(),
         privacyStatus:'public',
-        latencyPreference:$('#latency').value,
         quality:'720x1280'
       }
     });
