@@ -437,6 +437,30 @@ async function pollYouTube() {
       const incident = await Incident.create({ videoId, severity, risk: riskData.risk, concurrent: current.concurrent, baseline: riskData.baseline, delta: riskData.delta, reasons: riskData.reasons, reportText });
       broadcast({ type: 'incident', incident });
       await sendPush('YT Shield: shubhali trafik', `${riskData.risk}% risk • ${current.concurrent.toLocaleString()} viewer`, { incidentId: incident.id });
+
+      // Optional server-side emergency automation. OFF by default.
+      // When enabled by the user, only a very high local risk score can hide the current LIVE.
+      if (s.autoProtect && riskData.risk >= 95 && videoId) {
+        try {
+          const protectUrl = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts');
+          protectUrl.searchParams.set('part', 'status');
+          protectUrl.searchParams.set('key', '__OAUTH__');
+          const pr = await fetch(protectUrl, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              id: videoId,
+              status: { privacyStatus: 'unlisted', selfDeclaredMadeForKids: false }
+            }),
+            signal: AbortSignal.timeout(10000)
+          });
+          if (!pr.ok) throw new Error(`YouTube protect HTTP ${pr.status}`);
+          await sendPush('YT Shield: Auto Protect', 'Critical risk sabab LIVE vaqtincha Unlisted qilindi.', { incidentId: incident.id });
+          broadcast({ type: 'auto-protect', privacyStatus: 'unlisted', incidentId: incident.id });
+        } catch (protectErr) {
+          console.warn('[auto-protect]', protectErr.message || protectErr);
+        }
+      }
     }
   } catch (e) {
     liveState.monitor.connected = false;
