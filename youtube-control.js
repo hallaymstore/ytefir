@@ -193,113 +193,143 @@ function resolutionForQuality(quality) {
 function clampText(v, max) {
   return String(v || '').trim().slice(0, max);
 }
+
+function isInstantBroadcast(broadcast) {
+  const raw = broadcast?.snippet?.scheduledStartTime;
+  if (!raw) return true;
+  const ms = Date.parse(raw);
+  // Creator Studio's unscheduled / Stream-now broadcast is represented by Unix epoch zero.
+  return Number.isFinite(ms) && ms <= 1000;
+}
+function isRunnableBroadcast(broadcast) {
+  return ['created','ready','testing','testStarting','live','liveStarting'].includes(broadcast?.status?.lifeCycleStatus);
+}
+function isActiveBroadcast(broadcast) {
+  return ['testing','testStarting','live','liveStarting'].includes(broadcast?.status?.lifeCycleStatus);
+}
+function studioLiveUrl(channelId) {
+  return channelId
+    ? `https://studio.youtube.com/channel/${encodeURIComponent(channelId)}/livestreaming/stream`
+    : 'https://studio.youtube.com/';
+}
+async function updateVideoMetadata(token, videoId, opts = {}) {
+  const title = clampText(opts.title, 100);
+  const description = clampText(opts.description, 5000);
+  if (!title && !description) return;
+  const current = await youtube(`videos?part=snippet&id=${encodeURIComponent(videoId)}`, token);
+  const item = current.items?.[0];
+  if (!item?.snippet) return;
+  const old = item.snippet;
+  const snippet = {
+    title: title || old.title || 'LIVE',
+    description: description || old.description || '',
+    categoryId: old.categoryId || '22'
+  };
+  if (Array.isArray(old.tags)) snippet.tags = old.tags;
+  if (old.defaultLanguage) snippet.defaultLanguage = old.defaultLanguage;
+  if (old.defaultAudioLanguage) snippet.defaultAudioLanguage = old.defaultAudioLanguage;
+  await youtube('videos?part=snippet', token, {
+    method: 'PUT',
+    body: JSON.stringify({ id: videoId, snippet })
+  });
+}
+
 async function syncCurrentLive(token, channel) {
-  const active = await listBroadcasts(token, 'active');
-  const upcoming = active.length ? [] : await listBroadcasts(token, 'upcoming');
-  let broadcast = active[0] || null;
-  if (!broadcast && upcoming.length) {
-    broadcast = upcoming.find(x => x.contentDetails?.boundStreamId) || upcoming[0];
-  }
+  const all = await listBroadcasts(token, 'all');
+  const instant = all.filter(isRunnableBroadcast).filter(isInstantBroadcast);
+  const broadcast = instant.find(isActiveBroadcast) || instant.find(x => x.status?.lifeCycleStatus === 'ready') || instant[0] || null;
   const stream = broadcast ? await getBoundStream(token, broadcast) : null;
   const streamName = stream?.cdn?.ingestionInfo?.streamName || '';
-  const patch = { channelId: channel.id, youtubeApiKeyEnc: encrypt(OAUTH_MAGIC_KEY) };
-  if (broadcast?.id) patch.videoId = broadcast.id;
-  if (streamName) patch.streamKeyEnc = encrypt(streamName);
+
+  const patch = {
+    channelId: channel.id,
+    youtubeApiKeyEnc: encrypt(OAUTH_MAGIC_KEY),
+    quality: '720x1280'
+  };
+  // Never keep a stale scheduled broadcast in Shorts-only mode.
+  patch.videoId = broadcast?.id || '';
+  patch.streamKeyEnc = streamName ? encrypt(streamName) : '';
   await updateSettingDoc(patch);
+
   await saveOAuthDoc({
     channelId: channel.id,
     channelTitle: channel.title,
     channelThumbnail: channel.thumbnail,
     activeBroadcastId: broadcast?.id || '',
     activeStreamId: stream?.id || '',
-    liveChatId: broadcast?.snippet?.liveChatId || ''
+    liveChatId: broadcast?.snippet?.liveChatId || '',
+    shortsReady: Boolean(broadcast),
+    shortsUpdatedAt: new Date()
   });
-  return { broadcast, stream, streamName };
+
+  return {
+    broadcast,
+    stream,
+    streamName,
+    shortsReady: Boolean(broadcast),
+    studioUrl: studioLiveUrl(channel.id)
+  };
 }
 
 async function createLive(token, opts = {}) {
   const channel = await readChannel(token);
-  const active = await listBroadcasts(token, 'active');
-  if (active.length) {
-    const broadcast = active[0];
-    const stream = await getBoundStream(token, broadcast);
-    const streamName = stream?.cdn?.ingestionInfo?.streamName || '';
-    if (streamName) {
-      await updateSettingDoc({
-        channelId: channel.id,
-        videoId: broadcast.id,
-        streamKeyEnc: encrypt(streamName),
-        youtubeApiKeyEnc: encrypt(OAUTH_MAGIC_KEY)
+  const all = await listBroadcasts(token, 'all');
+  const instant = all.filter(isRunnableBroadcast).filter(isInstantBroadcast);
+  let broadcast = instant.find(isActiveBroadcast) || instant.find(x => x.status?.lifeCycleStatus === 'ready') || instant[0] || null;
+
+  if (!broadcast) {
+    const err = new Error('SHORTS LIVE uchun unscheduled / instant broadcast topilmadi. YouTube Studio’da Stream now rejimini bir marta tayyorlang.');
+    err.code = 'SHORTS_SETUP_REQUIRED';
+    err.status = 409;
+    err.studioUrl = studioLiveUrl(channel.id);
+    throw err;
+  }
+
+  await updateVideoMetadata(token, broadcast.id, opts).catch(err => {
+    console.warn('[metadata update]', err.message || err);
+  });
+
+  if (opts.privacyStatus && ['public','unlisted','private'].includes(opts.privacyStatus) && broadcast.status?.privacyStatus !== opts.privacyStatus) {
+    try {
+      broadcast = await youtube('liveBroadcasts?part=status', token, {
+        method: 'PUT',
+        body: JSON.stringify({
+          id: broadcast.id,
+          status: {
+            privacyStatus: opts.privacyStatus,
+            selfDeclaredMadeForKids: Boolean(broadcast.status?.selfDeclaredMadeForKids)
+          }
+        })
       });
-      await saveOAuthDoc({
-        channelId: channel.id,
-        channelTitle: channel.title,
-        channelThumbnail: channel.thumbnail,
-        activeBroadcastId: broadcast.id,
-        activeStreamId: stream.id,
-        liveChatId: broadcast.snippet?.liveChatId || ''
-      });
-      return { channel, broadcast, stream, reused: true };
+    } catch (err) {
+      console.warn('[privacy update]', err.message || err);
     }
   }
 
-  const setting = await getSettingDoc();
-  const quality = opts.quality || setting.quality || '720x1280';
-  const title = clampText(opts.title || `${channel.title} • LIVE`, 100) || 'LIVE';
-  const description = clampText(opts.description || '', 5000);
-  const privacyStatus = ['public', 'unlisted', 'private'].includes(opts.privacyStatus) ? opts.privacyStatus : 'public';
-  const latencyPreference = ['normal', 'low', 'ultraLow'].includes(opts.latencyPreference) ? opts.latencyPreference : 'ultraLow';
+  let stream = await getBoundStream(token, broadcast);
+  if (!stream) {
+    stream = await youtube('liveStreams?part=id,snippet,cdn,status,contentDetails', token, {
+      method: 'POST',
+      body: JSON.stringify({
+        snippet: { title: `YT Shield Shorts 9:16 • ${Date.now()}` },
+        cdn: { frameRate: '30fps', ingestionType: 'rtmp', resolution: '720p' },
+        contentDetails: { isReusable: false }
+      })
+    });
+    await youtube(`liveBroadcasts/bind?id=${encodeURIComponent(broadcast.id)}&streamId=${encodeURIComponent(stream.id)}&part=id,snippet,contentDetails,status`, token, { method: 'POST' });
+    broadcast = await getBroadcast(token, broadcast.id) || broadcast;
+    stream = await getStream(token, stream.id) || stream;
+  }
 
-  const stream = await youtube('liveStreams?part=id,snippet,cdn,status,contentDetails', token, {
-    method: 'POST',
-    body: JSON.stringify({
-      snippet: { title: `YT Shield 9:16 • ${Date.now()}` },
-      cdn: {
-        frameRate: '30fps',
-        ingestionType: 'rtmp',
-        resolution: resolutionForQuality(quality)
-      },
-      contentDetails: { isReusable: false }
-    })
-  });
-
-  const broadcast = await youtube('liveBroadcasts?part=id,snippet,status,contentDetails', token, {
-    method: 'POST',
-    body: JSON.stringify({
-      snippet: {
-        title,
-        description,
-        scheduledStartTime: new Date(Date.now() + 8_000).toISOString()
-      },
-      status: {
-        privacyStatus,
-        selfDeclaredMadeForKids: false
-      },
-      contentDetails: {
-        enableAutoStart: true,
-        enableAutoStop: false,
-        enableDvr: true,
-        enableEmbed: true,
-        recordFromStart: true,
-        latencyPreference,
-        monitorStream: { enableMonitorStream: false }
-      }
-    })
-  });
-
-  await youtube(`liveBroadcasts/bind?id=${encodeURIComponent(broadcast.id)}&streamId=${encodeURIComponent(stream.id)}&part=id,snippet,contentDetails,status`, token, { method: 'POST' });
-
-  const fullBroadcast = await getBroadcast(token, broadcast.id);
-  const fullStream = await getStream(token, stream.id);
-  const streamName = fullStream?.cdn?.ingestionInfo?.streamName;
-  if (!streamName) throw new Error('YouTube stream key qaytarmadi');
+  const streamName = stream?.cdn?.ingestionInfo?.streamName;
+  if (!streamName) throw new Error('YouTube instant stream key qaytarmadi');
 
   await updateSettingDoc({
     channelId: channel.id,
     videoId: broadcast.id,
     streamKeyEnc: encrypt(streamName),
     youtubeApiKeyEnc: encrypt(OAUTH_MAGIC_KEY),
-    quality
+    quality: '720x1280'
   });
   await saveOAuthDoc({
     channelId: channel.id,
@@ -307,22 +337,27 @@ async function createLive(token, opts = {}) {
     channelThumbnail: channel.thumbnail,
     activeBroadcastId: broadcast.id,
     activeStreamId: stream.id,
-    liveChatId: fullBroadcast?.snippet?.liveChatId || ''
+    liveChatId: broadcast.snippet?.liveChatId || '',
+    shortsReady: true,
+    shortsUpdatedAt: new Date()
   });
 
-  return { channel, broadcast: fullBroadcast || broadcast, stream: fullStream || stream, reused: false };
+  return { channel, broadcast, stream, reused: true, shorts: true, studioUrl: studioLiveUrl(channel.id) };
 }
 
 async function currentContext(token) {
-  const doc = await getOAuthDoc();
-  let broadcast = await getBroadcast(token, doc?.activeBroadcastId);
-  if (!broadcast || broadcast.status?.lifeCycleStatus === 'complete') {
-    const channel = await readChannel(token);
-    const synced = await syncCurrentLive(token, channel);
-    broadcast = synced.broadcast;
-  }
-  const stream = broadcast ? await getBoundStream(token, broadcast) : null;
-  return { broadcast, stream, chatId: broadcast?.snippet?.liveChatId || doc?.liveChatId || '' };
+  const channel = await readChannel(token);
+  const synced = await syncCurrentLive(token, channel);
+  const broadcast = synced.broadcast;
+  const stream = broadcast ? (synced.stream || await getBoundStream(token, broadcast)) : null;
+  return {
+    broadcast,
+    stream,
+    chatId: broadcast?.snippet?.liveChatId || '',
+    channel,
+    shortsReady: Boolean(broadcast),
+    studioUrl: synced.studioUrl
+  };
 }
 
 async function completeCurrent(token) {
@@ -356,12 +391,50 @@ async function updatePrivacy(token, privacyStatus) {
   });
 }
 
+
+async function transitionCurrentLive(token) {
+  let { broadcast, stream, studioUrl: setupUrl } = await currentContext(token);
+  if (!broadcast || !stream) {
+    const err = new Error('SHORTS LIVE tayyor emas');
+    err.code = 'SHORTS_SETUP_REQUIRED';
+    err.status = 409;
+    err.studioUrl = setupUrl;
+    throw err;
+  }
+  if (['live','liveStarting'].includes(broadcast.status?.lifeCycleStatus)) return { ok: true, broadcast, alreadyLive: true };
+
+  // Wait until YouTube is actually receiving RTMP packets.
+  const deadline = Date.now() + 35000;
+  while (Date.now() < deadline) {
+    stream = await getStream(token, stream.id) || stream;
+    if (stream.status?.streamStatus === 'active') break;
+    await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+  if (stream.status?.streamStatus !== 'active') {
+    const err = new Error('YouTube hali video oqimini qabul qilgani yo‘q. Internet/encoder holatini tekshiring.');
+    err.status = 409;
+    throw err;
+  }
+
+  broadcast = await getBroadcast(token, broadcast.id) || broadcast;
+  if (['live','liveStarting'].includes(broadcast.status?.lifeCycleStatus)) return { ok: true, broadcast, alreadyLive: true };
+
+  const out = await youtube(`liveBroadcasts/transition?broadcastStatus=live&id=${encodeURIComponent(broadcast.id)}&part=id,snippet,status,contentDetails`, token, {
+    method: 'POST'
+  });
+  await saveOAuthDoc({ activeBroadcastId: broadcast.id, activeStreamId: stream.id, liveChatId: out?.snippet?.liveChatId || '' });
+  return { ok: true, broadcast: out, stream };
+}
+
 async function liveStatus(token) {
   const channel = await readChannel(token);
-  const { broadcast, stream, chatId } = await currentContext(token);
+  const { broadcast, stream, chatId, shortsReady, studioUrl: setupUrl } = await currentContext(token);
   return {
     channel,
     connected: true,
+    shortsMode: true,
+    shortsReady,
+    studioUrl: setupUrl,
     broadcast: broadcast ? {
       id: broadcast.id,
       title: broadcast.snippet?.title || '',
@@ -369,6 +442,7 @@ async function liveStatus(token) {
       privacyStatus: broadcast.status?.privacyStatus || '',
       actualStartTime: broadcast.snippet?.actualStartTime || '',
       scheduledStartTime: broadcast.snippet?.scheduledStartTime || '',
+      instant: isInstantBroadcast(broadcast),
       liveChatId: chatId
     } : null,
     stream: stream ? {
@@ -569,7 +643,25 @@ function mountRoutes(app) {
         }
       });
     } catch (err) {
-      res.status(err.status || 500).json({ error: String(err.message || err) });
+      res.status(err.status || 500).json({
+        error: String(err.message || err),
+        code: err.code || '',
+        studioUrl: err.studioUrl || ''
+      });
+    }
+  });
+
+  app.post('/api/youtube/live/transition', guard, async (req, res) => {
+    try {
+      const token = await getAccessToken();
+      if (!token) return res.status(401).json({ error: 'YouTube ulanmagan' });
+      res.json(await transitionCurrentLive(token));
+    } catch (err) {
+      res.status(err.status || 500).json({
+        error: String(err.message || err),
+        code: err.code || '',
+        studioUrl: err.studioUrl || ''
+      });
     }
   });
 
