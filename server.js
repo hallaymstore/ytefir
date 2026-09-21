@@ -305,16 +305,18 @@ wss.on('connection', ws => {
         ws.send(JSON.stringify({ type: 'ingest-error', error: 'YouTube stream key kiritilmagan' }));
         return;
       }
-      const [w, h] = String(msg.quality || s.quality || '720x1280').split('x').map(Number);
-      const fps = Math.max(24, Math.min(30, Number(msg.fps || 30)));
-      const bitrate = w >= 1080 ? '4500k' : w >= 720 ? '2800k' : '1800k';
+      // Shorts Live mode is fixed to vertical 9:16. Ignore client-provided dimensions.
+      const w = 720;
+      const h = 1280;
+      const fps = 30;
+      const bitrate = '3200k';
       const outUrl = `rtmps://a.rtmps.youtube.com/live2/${streamKey}`;
       const args = [
         '-hide_banner', '-loglevel', 'warning',
         '-fflags', '+genpts', '-f', 'webm', '-i', 'pipe:0',
         '-vf', `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`,
         '-r', String(fps), '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency',
-        '-profile:v', 'main', '-pix_fmt', 'yuv420p', '-b:v', bitrate, '-maxrate', bitrate, '-bufsize', w >= 1080 ? '9000k' : '5600k',
+        '-profile:v', 'main', '-pix_fmt', 'yuv420p', '-b:v', bitrate, '-maxrate', bitrate, '-bufsize', '6400k',
         '-g', String(fps * 2), '-keyint_min', String(fps * 2), '-sc_threshold', '0',
         '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
         '-f', 'flv', outUrl
